@@ -6,7 +6,7 @@ import { addDays, ddmm, ddmmyyyy, isoWeek, shiftAnchor, startOfWeek, today as ge
 import { downloadCsv } from '@/lib/export';
 import { computeView, type ViewInput } from '@/lib/selectors';
 import { useFinance } from '@/lib/finance';
-import type { Mode, Priority, Status, StatusFilter, Tab, Tag } from '@/lib/types';
+import type { AppData, Mode, Priority, Status, StatusFilter, Tab, Tag } from '@/lib/types';
 import { useWorkHub } from '@/lib/useWorkHub';
 import { Composer } from './Composer';
 import { EditDrawer } from './EditDrawer';
@@ -19,6 +19,11 @@ import { Sidebar } from './Sidebar';
 import { StatCards } from './StatCards';
 import { WeekGroup } from './WeekGroup';
 
+// Tạm đóng chức năng "Quản lý công việc" (dữ liệu vẫn giữ nguyên). Đổi thành true để mở lại.
+export const SHOW_WORK = false;
+
+const EMPTY_WORK: AppData = { version: 1, tasks: [], goals: [], dark: false };
+
 const TAB_KEY = 'workhub:tab';
 const TABS: [Tab, string][] = [
   ['work', 'Quản lý công việc'],
@@ -28,7 +33,8 @@ const TABS: [Tab, string][] = [
 export default function Dashboard() {
   const store = useWorkHub();
   const finance = useFinance();
-  const [tab, setTabState] = useState<Tab>('work');
+  const [tabState, setTabState] = useState<Tab>(SHOW_WORK ? 'work' : 'finance');
+  const tab: Tab = SHOW_WORK ? tabState : 'finance';
   const [today, setToday] = useState('');
   const [mode, setMode] = useState<Mode>('month');
   const [anchor, setAnchor] = useState('');
@@ -83,15 +89,17 @@ export default function Dashboard() {
   }, [apiMessage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ui: ViewInput = { mode, anchor, query, statusF, prioF, tagF };
+  // With work management turned off, the finance tab must not wait for (or break on) the work data.
+  const workData = store.data ?? (SHOW_WORK ? null : EMPTY_WORK);
   const view = useMemo(
-    () => (store.data && anchor ? computeView(store.data, ui, today) : null),
+    () => (workData && anchor ? computeView(workData, ui, today) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store.data, mode, anchor, query, statusF, prioF, tagF, today],
+    [workData, mode, anchor, query, statusF, prioF, tagF, today],
   );
   const goalMap = useMemo(() => new Map((store.data?.goals ?? []).map((g) => [g.id, g])), [store.data?.goals]);
   const closeEdit = useCallback(() => setEditId(null), []);
 
-  if (!store.data || !view) {
+  if (!workData || !view) {
     return (
       <div className="flex min-h-screen items-center justify-center px-4" aria-busy={!toast}>
         {toast && (
@@ -103,7 +111,7 @@ export default function Dashboard() {
     );
   }
 
-  const data = store.data;
+  const data = workData;
   const editing = editId ? data.tasks.find((t) => t.id === editId) : undefined;
   const thisWeek = startOfWeek(today);
 
@@ -139,6 +147,7 @@ export default function Dashboard() {
   const sidebarProps = {
     tab,
     onTab: setTab,
+    showWork: SHOW_WORK,
     mode,
     atCurrentPeriod,
     noFilters,
@@ -183,7 +192,8 @@ export default function Dashboard() {
       )}
 
       <div className="min-w-0 flex-1 px-4 pb-12 pt-7 lg:px-7">
-      <main className="mx-auto flex max-w-[1180px] flex-col gap-5.5">
+      <main className={`mx-auto flex flex-col ${tab === 'finance' ? 'max-w-[1600px] gap-4' : 'max-w-[1180px] gap-5.5'}`}>
+        {SHOW_WORK && (
         <div role="tablist" aria-label="Chọn mục quản lý" className="flex gap-1 self-start rounded-xl bg-slate-200/70 p-1 dark:bg-[#151B2E]">
           {TABS.map(([t, label]) => (
             <button
@@ -203,6 +213,7 @@ export default function Dashboard() {
             </button>
           ))}
         </div>
+        )}
 
         {tab === 'finance' ? (
           <FinancePanel store={finance} today={today} onMenu={() => setMenuOpen(true)} flash={flash} />

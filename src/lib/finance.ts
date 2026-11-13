@@ -2,52 +2,63 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errorMessage } from './api';
+import { addDays, startOfWeek } from './date';
 import { uid } from './useWorkHub';
 
 export interface Person {
   id: string;
   name: string;
+  /** Where payment reminders are sent (optional). */
+  email?: string | null;
 }
 
-/** A shared expense. Amounts are in thousands of VND (90 = 90.000đ). */
-export interface Expense {
+/** One amount for one person. Amounts are in thousands of VND (90 = 90.000đ). */
+export interface Entry {
   id: string;
-  title: string;
-  /** YYYY-MM-DD */
+  personId: string;
+  content: string;
+  /** YYYY-MM-DD; the week is derived from it */
   date: string;
-  /** personId -> amount that person owes for this expense */
-  shares: Record<string, number>;
-  /** personId -> whether that person has paid their share */
-  paid: Record<string, boolean>;
+  amount: number;
+  paid: boolean;
 }
 
 export interface FinanceData {
-  version: 1;
+  version: 2;
   people: Person[];
-  expenses: Expense[];
+  entries: Entry[];
 }
 
-export type NewExpense = Pick<Expense, 'title' | 'date' | 'shares'>;
+export type NewEntry = Omit<Entry, 'id' | 'paid'>;
+export type EntryPatch = Partial<Omit<Entry, 'id'>>;
 
 export const FINANCE_KEY = 'workhub:finance:v1';
-export const DEFAULT_PEOPLE = ['A Q.Hội', 'Anh Lợi', 'A.Phong', 'A.Nam', 'Sẹn', 'Lộc', 'Hưng', 'Trí', 'Hằng'];
+/** Names created on first run. Empty: add people from the “+ Thêm tên” row. */
+export const DEFAULT_PEOPLE: string[] = [];
 
-function freshFinance(): FinanceData {
-  return { version: 1, people: DEFAULT_PEOPLE.map((name) => ({ id: uid(), name })), expenses: [] };
+function freshFinance(): Omit<FinanceData, 'version'> {
+  return { people: DEFAULT_PEOPLE.map((name) => ({ id: uid(), name })), entries: [] };
 }
 
-/** Old browser-only data, imported into the server the first time. */
-function readLegacy(): FinanceData | null {
+/** Old browser-only data (one row per expense with a per-person map), converted to entries. */
+function readLegacy(): Omit<FinanceData, 'version'> | null {
   try {
     const raw = localStorage.getItem(FINANCE_KEY);
-    if (raw) {
-      const d = JSON.parse(raw) as FinanceData;
-      if (d && d.version === 1 && Array.isArray(d.people) && Array.isArray(d.expenses)) return d;
-    }
+    if (!raw) return null;
+    const d = JSON.parse(raw) as {
+      people?: Person[];
+      expenses?: { id: string; title: string; date: string; shares: Record<string, number>; paid: Record<string, boolean> }[];
+    };
+    if (!Array.isArray(d.people) || !Array.isArray(d.expenses)) return null;
+    const entries: Entry[] = d.expenses.flatMap((x) =>
+      Object.entries(x.shares)
+        .filter(([, amount]) => amount > 0)
+        .map(([personId, amount]) => ({ id: uid(), personId, content: x.title, date: x.date, amount, paid: !!x.paid[personId] })),
+    );
+    return { people: d.people, entries };
   } catch {
-    /* unreadable: start with the default people */
+    return null;
   }
-  return null;
 }
 
 /** 90 -> "90.000đ" */
@@ -55,30 +66,57 @@ export function money(k: number): string {
   return `${Math.round(k * 1000).toLocaleString('vi-VN')}đ`;
 }
 
-export interface PersonSummary {
-  person: Person;
-  owed: number;
+export interface Totals {
+  total: number;
   paid: number;
   due: number;
 }
 
-export function summarize(data: FinanceData): { rows: PersonSummary[]; owed: number; paid: number; due: number } {
-  const rows = data.people.map((person) => {
-    let owed = 0;
-    let paid = 0;
-    for (const e of data.expenses) {
-      const amt = e.shares[person.id] ?? 0;
-      owed += amt;
-      if (e.paid[person.id]) paid += amt;
-    }
-    return { person, owed, paid, due: owed - paid };
-  });
-  const sum = (k: 'owed' | 'paid' | 'due') => rows.reduce((s, r) => s + r[k], 0);
-  return { rows, owed: sum('owed'), paid: sum('paid'), due: sum('due') };
+export function totals(entries: Entry[]): Totals {
+  let total = 0;
+  let paid = 0;
+  for (const e of entries) {
+    total += e.amount;
+    if (e.paid) paid += e.amount;
+  }
+  return { total, paid, due: total - paid };
+}
+
+export interface WeekGroupView {
+  start: string;
+  end: string;
+  entries: Entry[];
+  totals: Totals;
+  /** Per person who has entries this week, in the people order. */
+  byPerson: { person: Person; totals: Totals }[];
+}
+
+/** Groups entries by ISO week (Monday start), newest week first; entries newest first inside a week. */
+export function groupByWeek(people: Person[], entries: Entry[]): WeekGroupView[] {
+  const weeks = new Map<string, Entry[]>();
+  for (const e of entries) {
+    const k = startOfWeek(e.date);
+    const list = weeks.get(k);
+    if (list) list.push(e);
+    else weeks.set(k, [e]);
+  }
+  const order = new Map(people.map((p, i) => [p.id, i]));
+  return [...weeks.entries()]
+    .sort(([a], [b]) => (a < b ? 1 : -1))
+    .map(([start, list]) => {
+      const sorted = [...list].sort((a, b) =>
+        a.date === b.date ? (order.get(a.personId) ?? 0) - (order.get(b.personId) ?? 0) : a.date < b.date ? 1 : -1,
+      );
+      const byPerson = people
+        .map((person) => ({ person, list: list.filter((e) => e.personId === person.id) }))
+        .filter((x) => x.list.length)
+        .map((x) => ({ person: x.person, totals: totals(x.list) }));
+      return { start, end: addDays(start, 6), entries: sorted, totals: totals(list), byPerson };
+    });
 }
 
 /**
- * Shared-expense ledger backed by the server API. Changes show immediately, then are saved;
+ * Finance state backed by the server API. Changes show immediately, then are saved in order;
  * if saving fails the error is reported and the data is reloaded from the server.
  */
 export function useFinance() {
@@ -91,8 +129,8 @@ export function useFinance() {
 
   const reload = useCallback(async () => {
     try {
-      const r = await api<{ people: Person[]; expenses: Expense[]; initialized: boolean }>('GET', '/api/finance');
-      setData({ version: 1, people: r.people, expenses: r.expenses });
+      const r = await api<{ people: Person[]; entries: Entry[]; initialized: boolean }>('GET', '/api/finance');
+      setData({ version: 2, people: r.people, entries: r.entries });
       return r;
     } catch (e) {
       setError(errorMessage(e));
@@ -105,9 +143,8 @@ export function useFinance() {
       const r = await reload();
       if (!r || r.initialized) return;
       // First run against this server: import the browser's data, or start with the default people.
-      const start = readLegacy() ?? freshFinance();
       try {
-        await api('PUT', '/api/finance', { people: start.people, expenses: start.expenses });
+        await api('PUT', '/api/finance', readLegacy() ?? freshFinance());
         await reload();
       } catch (e) {
         setError(errorMessage(e));
@@ -116,14 +153,14 @@ export function useFinance() {
   }, [reload]);
 
   const commit = useCallback(
-    (fn: (d: FinanceData) => FinanceData, save: (next: FinanceData) => Promise<unknown>) => {
+    (fn: (d: FinanceData) => FinanceData, save: () => Promise<unknown>) => {
       const d = ref.current;
       if (!d) return;
       const next = fn(d);
       ref.current = next;
       setData(next);
       queue.current = queue.current.then(() =>
-        save(next).catch((e) => {
+        save().catch((e) => {
           setError(`Chưa lưu được: ${errorMessage(e)}`);
           return reload();
         }),
@@ -132,19 +169,12 @@ export function useFinance() {
     [reload],
   );
 
-  const mapExpense = (id: string, fn: (e: Expense) => Expense) => (d: FinanceData) => ({
-    ...d,
-    expenses: d.expenses.map((e) => (e.id === id ? fn(e) : e)),
-  });
-  const saveExpense = (id: string, pick: (e: Expense) => Partial<Expense>) => (next: FinanceData) => {
-    const e = next.expenses.find((x) => x.id === id);
-    return e ? api('PATCH', `/api/expenses/${id}`, pick(e)) : Promise.resolve();
-  };
-
+  /** Returns the new person so callers can add entries for them right away (saves stay in order). */
   const addPerson = useCallback(
-    (name: string) => {
-      const p: Person = { id: uid(), name };
+    (name: string, email?: string | null): Person => {
+      const p: Person = { id: uid(), name, email: email || null };
       commit((d) => ({ ...d, people: [...d.people, p] }), () => api('POST', '/api/people', p));
+      return p;
     },
     [commit],
   );
@@ -158,66 +188,55 @@ export function useFinance() {
     [commit],
   );
 
+  const setPersonEmail = useCallback(
+    (id: string, email: string | null) =>
+      commit(
+        (d) => ({ ...d, people: d.people.map((p) => (p.id === id ? { ...p, email } : p)) }),
+        () => api('PATCH', `/api/people/${id}`, { email: email ?? '' }),
+      ),
+    [commit],
+  );
+
+  /** Also deletes that person's entries. */
   const removePerson = useCallback(
     (id: string) =>
       commit(
-        (d) => ({
-          ...d,
-          people: d.people.filter((p) => p.id !== id),
-          expenses: d.expenses.map((e) => {
-            const { [id]: _s, ...shares } = e.shares;
-            const { [id]: _p, ...paid } = e.paid;
-            return { ...e, shares, paid };
-          }),
-        }),
+        (d) => ({ ...d, people: d.people.filter((p) => p.id !== id), entries: d.entries.filter((e) => e.personId !== id) }),
         () => api('DELETE', `/api/people/${id}`),
       ),
     [commit],
   );
 
-  const addExpense = useCallback(
-    (e: NewExpense) => {
-      const x: Expense = { ...e, id: uid(), paid: {} };
-      commit((d) => ({ ...d, expenses: [...d.expenses, x] }), () => api('POST', '/api/expenses', x));
+  /** Adds the given entries (e.g. the same content for several people) in one request. */
+  const addEntries = useCallback(
+    (list: NewEntry[]) => {
+      const created: Entry[] = list.map((e) => ({ ...e, id: uid(), paid: false }));
+      commit((d) => ({ ...d, entries: [...d.entries, ...created] }), () => api('POST', '/api/entries', { entries: created }));
     },
     [commit],
   );
 
-  const updateExpense = useCallback(
-    (id: string, patch: Partial<Pick<Expense, 'title' | 'date'>>) =>
-      commit(mapExpense(id, (e) => ({ ...e, ...patch })), () => api('PATCH', `/api/expenses/${id}`, patch)),
-    [commit], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  const setShare = useCallback(
-    (id: string, personId: string, amount: number) =>
+  const updateEntry = useCallback(
+    (id: string, patch: EntryPatch) =>
       commit(
-        mapExpense(id, (e) => {
-          const shares = { ...e.shares };
-          const paid = { ...e.paid };
-          if (amount > 0) shares[personId] = amount;
-          else {
-            delete shares[personId];
-            delete paid[personId];
-          }
-          return { ...e, shares, paid };
-        }),
-        saveExpense(id, (e) => ({ shares: e.shares, paid: e.paid })),
+        (d) => ({ ...d, entries: d.entries.map((e) => (e.id === id ? { ...e, ...patch } : e)) }),
+        () => api('PATCH', `/api/entries/${id}`, patch),
       ),
-    [commit], // eslint-disable-line react-hooks/exhaustive-deps
+    [commit],
   );
 
-  const togglePaid = useCallback(
-    (id: string, personId: string) =>
-      commit(
-        mapExpense(id, (e) => ({ ...e, paid: { ...e.paid, [personId]: !e.paid[personId] } })),
-        saveExpense(id, (e) => ({ paid: e.paid })),
-      ),
-    [commit], // eslint-disable-line react-hooks/exhaustive-deps
+  const deleteEntry = useCallback(
+    (id: string) => commit((d) => ({ ...d, entries: d.entries.filter((e) => e.id !== id) }), () => api('DELETE', `/api/entries/${id}`)),
+    [commit],
   );
 
-  const deleteExpense = useCallback(
-    (id: string) => commit((d) => ({ ...d, expenses: d.expenses.filter((e) => e.id !== id) }), () => api('DELETE', `/api/expenses/${id}`)),
+  /** Deletes many entries in one request (used to delete a whole week). */
+  const deleteEntries = useCallback(
+    (ids: string[]) => {
+      if (!ids.length) return;
+      const drop = new Set(ids);
+      commit((d) => ({ ...d, entries: d.entries.filter((e) => !drop.has(e.id)) }), () => api('POST', '/api/entries/delete', { ids }));
+    },
     [commit],
   );
 
@@ -227,12 +246,12 @@ export function useFinance() {
     clearError: () => setError(null),
     addPerson,
     renamePerson,
+    setPersonEmail,
     removePerson,
-    addExpense,
-    updateExpense,
-    setShare,
-    togglePaid,
-    deleteExpense,
+    addEntries,
+    updateEntry,
+    deleteEntry,
+    deleteEntries,
   };
 }
 

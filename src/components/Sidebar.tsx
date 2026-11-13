@@ -10,6 +10,8 @@ const SHOW_EXTRA_NAV = false;
 interface Props {
   tab: Tab;
   onTab: (t: Tab) => void;
+  /** false = work management is turned off (only the finance tab is shown). */
+  showWork: boolean;
   mode: Mode;
   /** The anchor is inside the current week/month/quarter. */
   atCurrentPeriod: boolean;
@@ -100,15 +102,17 @@ export function Sidebar(p: Props) {
       </div>
 
       <Section title="Tổng quan">
-        <Item
-          icon="grid"
-          label="Quản lý công việc"
-          active={p.tab === 'work'}
-          onClick={go(() => {
-            p.onTab('work');
-            p.onHome();
-          })}
-        />
+        {p.showWork && (
+          <Item
+            icon="grid"
+            label="Quản lý công việc"
+            active={p.tab === 'work'}
+            onClick={go(() => {
+              p.onTab('work');
+              p.onHome();
+            })}
+          />
+        )}
         <Item icon="wallet" label="Quản lý thu chi" active={p.tab === 'finance'} onClick={go(() => p.onTab('finance'))} />
         {SHOW_EXTRA_NAV && (
           <>
@@ -164,8 +168,12 @@ export function Sidebar(p: Props) {
 
       <div className="mt-auto flex flex-col gap-0.5 border-t border-slate-200 pt-4 dark:border-[#232B45]">
         <Item icon={p.dark ? 'sun' : 'moon'} label={p.dark ? 'Giao diện sáng' : 'Giao diện tối'} onClick={p.onToggleDark} />
-        <Item icon="refresh" label="Tải dữ liệu mẫu" onClick={go(p.onLoadSample)} />
-        <Item icon="trash" label="Xóa toàn bộ dữ liệu" onClick={go(p.onClearAll)} />
+        {p.showWork && (
+          <>
+            <Item icon="refresh" label="Tải dữ liệu mẫu" onClick={go(p.onLoadSample)} />
+            <Item icon="trash" label="Xóa toàn bộ dữ liệu" onClick={go(p.onClearAll)} />
+          </>
+        )}
         <Item icon="logout" label="Đăng xuất" onClick={p.onLogout} />
       </div>
     </nav>

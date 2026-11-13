@@ -1,17 +1,16 @@
-import { removePerson, renamePerson } from '@/server/db';
+import { getPerson, removePerson, updatePerson } from '@/server/db';
 import { handler, notFound, type IdContext } from '@/server/route';
-import { personName } from '@/server/validate';
+import { personPatch } from '@/server/validate';
 
-/** Body: { name } */
+/** Body: any of { name, email } (email '' or null clears it). */
 export const PATCH = handler<IdContext>(async (body, { params }) => {
   const { id } = await params;
-  const name = personName(body);
-  if (!renamePerson(id, name)) return notFound();
-  return { id, name };
+  if (!(await updatePerson(id, personPatch(body)))) return notFound();
+  return await getPerson(id);
 });
 
-/** Also removes the person's amounts from every expense. */
+/** Also deletes the person's entries. */
 export const DELETE = handler<IdContext>(async (_body, { params }) => {
   const { id } = await params;
-  if (!removePerson(id)) return notFound();
+  if (!(await removePerson(id))) return notFound();
 });

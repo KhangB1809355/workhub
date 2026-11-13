@@ -4,12 +4,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errorMessage } from './api';
 import { addDays, nextOccurrence, today } from './date';
 import { makeSample } from './seed';
+import { saveThemeCookie } from './theme';
 import type { AppData, Goal, NewTask, Task, TaskPatch } from './types';
 
 /** Old browser-only storage. Read once to import existing data into the server. */
 export const STORAGE_KEY = 'workhub:v1';
-/** Theme cache so layout.tsx can apply dark mode before the first paint. */
-export const THEME_KEY = 'workhub:theme';
 
 export function uid(): string {
   try {
@@ -86,11 +85,7 @@ export function useWorkHub() {
   useEffect(() => {
     if (!data) return;
     document.documentElement.classList.toggle('dark', data.dark);
-    try {
-      localStorage.setItem(THEME_KEY, data.dark ? 'dark' : 'light');
-    } catch {
-      /* ignore */
-    }
+    saveThemeCookie(data.dark);
   }, [data?.dark]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Applies a change locally right away, then runs the API call(s). */

@@ -4,14 +4,14 @@ import { taskPatch } from '@/server/validate';
 
 export const PATCH = handler<IdContext>(async (body, { params }) => {
   const { id } = await params;
-  const current = getTask(id);
+  const current = await getTask(id);
   if (!current) return notFound();
   const next = { ...current, ...taskPatch(body), id };
-  saveTask(next);
+  await saveTask(next);
   return next;
 });
 
 export const DELETE = handler<IdContext>(async (_body, { params }) => {
   const { id } = await params;
-  if (!deleteTask(id)) return notFound();
+  if (!(await deleteTask(id))) return notFound();
 });

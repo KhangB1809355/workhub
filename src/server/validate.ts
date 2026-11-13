@@ -1,5 +1,5 @@
 import 'server-only';
-import type { Expense, Person } from '@/lib/finance';
+import type { Entry, Person } from '@/lib/finance';
 import type { Goal, Priority, Repeat, Status, Subtask, Tag, Task } from '@/lib/types';
 
 /** Thrown for bad request bodies; route handlers turn it into a 400 response. */
@@ -106,51 +106,78 @@ export function moveRequest(v: unknown): { dates: Record<string, string> } {
   return { dates };
 }
 
+const EMAIL = /^[^\s@<>(),;:"\[\]\\]+@[^\s@<>(),;:"\[\]\\]+\.[^\s@<>(),;:"\[\]\\]{2,}$/;
+
+/** Optional email: '' or null clears it. Strict on purpose (single plain address, no display names). */
+export function email(v: unknown): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  const s = str(v, 'email', 254).trim().toLowerCase();
+  if (!s) return null;
+  if (!EMAIL.test(s)) throw new BadRequest('Email không hợp lệ');
+  return s;
+}
+
 export function person(v: unknown): Person {
   const o = obj(v);
-  return { id: id(o.id), name: text(o.name, 'name', 80) };
+  return { id: id(o.id), name: text(o.name, 'name', 80), email: email(o.email) };
 }
 
-export function personName(v: unknown): string {
-  return text(obj(v).name, 'name', 80);
-}
-
-function amounts(v: unknown): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [k, n] of Object.entries(obj(v, 'shares'))) {
-    if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0 || n > 1e9) throw new BadRequest('Số tiền không hợp lệ');
-    out[id(k, 'personId')] = n;
-  }
-  return out;
-}
-
-function flags(v: unknown): Record<string, boolean> {
-  const out: Record<string, boolean> = {};
-  for (const [k, b] of Object.entries(obj(v, 'paid'))) {
-    if (typeof b !== 'boolean') throw new BadRequest('paid phải là true/false');
-    out[id(k, 'personId')] = b;
-  }
-  return out;
-}
-
-export function expensePatch(v: unknown): Partial<Omit<Expense, 'id'>> {
+/** Body: any of { name, email } */
+export function personPatch(v: unknown): { name?: string; email?: string | null } {
   const o = obj(v);
-  const out: Partial<Omit<Expense, 'id'>> = {};
-  if ('title' in o) out.title = text(o.title, 'title');
+  const out: { name?: string; email?: string | null } = {};
+  if ('name' in o) out.name = text(o.name, 'name', 80);
+  if ('email' in o) out.email = email(o.email);
+  if (!('name' in o) && !('email' in o)) throw new BadRequest('Cần name hoặc email');
+  return out;
+}
+
+function amount(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 1e9) throw new BadRequest('Giá tiền không hợp lệ');
+  return v;
+}
+
+export function entryPatch(v: unknown): Partial<Omit<Entry, 'id'>> {
+  const o = obj(v);
+  const out: Partial<Omit<Entry, 'id'>> = {};
+  if ('personId' in o) out.personId = id(o.personId, 'personId');
+  if ('content' in o) out.content = text(o.content, 'content');
   if ('date' in o) out.date = date(o.date);
-  if ('shares' in o) out.shares = amounts(o.shares);
-  if ('paid' in o) out.paid = flags(o.paid);
+  if ('amount' in o) out.amount = amount(o.amount);
+  if ('paid' in o) {
+    if (typeof o.paid !== 'boolean') throw new BadRequest('paid phải là true/false');
+    out.paid = o.paid;
+  }
   return out;
 }
 
-export function expense(v: unknown): Expense {
+export function entry(v: unknown): Entry {
   const o = obj(v);
-  const p = expensePatch(o);
-  if (p.title === undefined || p.date === undefined) throw new BadRequest('Thiếu title hoặc date');
-  return { id: id(o.id), shares: {}, paid: {}, ...p } as Expense;
+  const p = entryPatch(o);
+  for (const k of ['personId', 'content', 'date', 'amount'] as const) {
+    if (p[k] === undefined) throw new BadRequest(`Thiếu ${k}`);
+  }
+  return { id: id(o.id), paid: false, ...p } as Entry;
 }
 
-export function financeSnapshot(v: unknown): { people: Person[]; expenses: Expense[] } {
+/** Body: { entries: Entry[] } */
+export function entryList(v: unknown): Entry[] {
+  const list = arr(obj(v).entries, 'entries');
+  if (list.length === 0 || list.length > 500) throw new BadRequest('entries phải có từ 1 đến 500 dòng');
+  return list.map(entry);
+}
+
+/** people + entries for a full replace; drops entries whose person is not in the list. */
+export function financeSnapshot(v: unknown): { people: Person[]; entries: Entry[] } {
   const o = obj(v);
-  return { people: arr(o.people, 'people').map(person), expenses: arr(o.expenses, 'expenses').map(expense) };
+  const people = arr(o.people, 'people').map(person);
+  const known = new Set(people.map((p) => p.id));
+  return { people, entries: arr(o.entries, 'entries').map(entry).filter((e) => known.has(e.personId)) };
+}
+
+/** Body: { ids: string[] } (1–1000 ids) */
+export function idList(v: unknown): string[] {
+  const list = arr(obj(v).ids, 'ids');
+  if (list.length === 0 || list.length > 1000) throw new BadRequest('ids phải có từ 1 đến 1000 phần tử');
+  return list.map((x) => id(x));
 }
