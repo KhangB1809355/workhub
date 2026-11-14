@@ -9,13 +9,14 @@ import { Icon } from './Icon';
 const money = (k: number) => `${Math.round(k * 1000).toLocaleString('vi-VN')}đ`;
 
 /**
- * Admin only: ONE "Gửi email" button that emails everyone who has an email address and something unpaid,
- * in a single request, after a confirmation listing the recipients.
+ * Admin only: ONE "Gửi email" button. The dialog lists everyone who has an email address and something unpaid
+ * (all ticked by default); the admin picks who to send to, then everything goes out in a single request.
  */
 export function MailControl({ people, entries, status, flash }: { people: Person[]; entries: Entry[]; status: MailStatus | null; flash: (msg: string) => void }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<MailResult[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!open) return;
@@ -29,11 +30,27 @@ export function MailControl({ people, entries, status, flash }: { people: Person
   const owing = people.filter((p) => (due.get(p.id) ?? 0) > 0);
   const recipients = owing.filter((p) => p.email);
   const missing = owing.filter((p) => !p.email);
+  const chosen = recipients.filter((p) => selected.has(p.id));
+  const allChosen = recipients.length > 0 && chosen.length === recipients.length;
+
+  const openDialog = () => {
+    setSelected(new Set(recipients.map((p) => p.id)));
+    setResults(null);
+    setOpen(true);
+  };
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAll = () => setSelected(allChosen ? new Set() : new Set(recipients.map((p) => p.id)));
 
   const send = async () => {
     setBusy(true);
     try {
-      const r = await sendMail(recipients.map((p) => p.id));
+      const r = await sendMail(chosen.map((p) => p.id));
       setResults(r.results);
       flash(summarizeResults(r.results) + (r.shareCreated ? ' · đã bật link chia sẻ' : ''));
     } catch (e) {
@@ -47,13 +64,13 @@ export function MailControl({ people, entries, status, flash }: { people: Person
     setOpen(false);
     setResults(null);
   };
-  const canSend = !!status?.configured && recipients.length > 0 && !busy;
+  const canSend = !!status?.configured && chosen.length > 0 && !busy;
 
   return (
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={openDialog}
         className="flex h-10 items-center gap-2 rounded-xl border border-white/25 px-3.5 text-[13px] font-bold text-white transition hover:bg-white/10"
       >
         <Icon name="mail" strokeWidth={2.2} />
@@ -104,18 +121,34 @@ export function MailControl({ people, entries, status, flash }: { people: Person
             ) : (
               <>
                 <div className="flex flex-col gap-1.5">
-                  <p className="text-sm font-bold">Sẽ gửi tới {recipients.length} người</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-bold">
+                      Chọn người nhận ({chosen.length}/{recipients.length})
+                    </p>
+                    {recipients.length > 1 && (
+                      <button type="button" onClick={toggleAll} className="text-[13px] font-semibold text-indigo-600 hover:underline dark:text-indigo-300">
+                        {allChosen ? 'Bỏ chọn tất cả' : 'Chọn tất cả'}
+                      </button>
+                    )}
+                  </div>
                   {recipients.length === 0 ? (
                     <p className={`text-[13px] ${MUTED}`}>Không có ai vừa có email vừa còn khoản chưa trả.</p>
                   ) : (
                     <ul className="flex flex-col gap-1 text-[13px]">
                       {recipients.map((p) => (
-                        <li key={p.id} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 dark:bg-[#1B2238]">
-                          <span className="min-w-0">
-                            <span className="font-semibold">{p.name}</span>
-                            <span className={`ml-2 text-xs ${FAINT}`}>{p.email}</span>
-                          </span>
-                          <b className="whitespace-nowrap tabular-nums text-orange-700 dark:text-orange-300">{money(due.get(p.id) ?? 0)}</b>
+                        <li key={p.id}>
+                          <label
+                            className={`flex cursor-pointer items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 transition hover:bg-slate-100 dark:bg-[#1B2238] dark:hover:bg-[#232B45] ${selected.has(p.id) ? '' : 'opacity-60'}`}
+                          >
+                            <span className="flex min-w-0 items-center gap-2.5">
+                              <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} disabled={busy} className="h-4 w-4 flex-none accent-indigo-600" />
+                              <span className="min-w-0">
+                                <span className="font-semibold">{p.name}</span>
+                                <span className={`ml-2 text-xs ${FAINT}`}>{p.email}</span>
+                              </span>
+                            </span>
+                            <b className="whitespace-nowrap tabular-nums text-orange-700 dark:text-orange-300">{money(due.get(p.id) ?? 0)}</b>
+                          </label>
                         </li>
                       ))}
                     </ul>
@@ -141,7 +174,7 @@ export function MailControl({ people, entries, status, flash }: { people: Person
                   className="flex h-10 items-center gap-1.5 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white transition hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500"
                 >
                   <Icon name="mail" />
-                  {busy ? 'Đang gửi…' : `Gửi cho ${recipients.length} người`}
+                  {busy ? 'Đang gửi…' : `Gửi cho ${chosen.length} người`}
                 </button>
               )}
             </div>
