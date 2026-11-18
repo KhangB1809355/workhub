@@ -10,7 +10,15 @@ export interface Person {
   name: string;
   /** Where payment reminders are sent (optional). */
   email?: string | null;
+  /** Unpaid debt from before this app (thousands of VND, 0 = none). Counted in “all weeks” totals. */
+  debt?: number;
+  /** What the opening debt is for (optional). */
+  debtNote?: string | null;
 }
+
+/** A person's opening debt (0 when none). */
+export const debtOf = (p: Pick<Person, 'debt'> | undefined) => (p?.debt && p.debt > 0 ? p.debt : 0);
+
 
 /** One amount for one person. Amounts are in thousands of VND (90 = 90.000đ). */
 export interface Entry {
@@ -21,16 +29,20 @@ export interface Entry {
   date: string;
   amount: number;
   paid: boolean;
+  /** ISO timestamp set by the server when the entry was marked paid; null while unpaid (or for old data). */
+  paidAt?: string | null;
 }
 
 export interface FinanceData {
   version: 2;
   people: Person[];
   entries: Entry[];
+  /** Shared Google Drive link (bills, receipts…) shown to everyone; null = none. */
+  driveUrl?: string | null;
 }
 
 export type NewEntry = Omit<Entry, 'id' | 'paid'>;
-export type EntryPatch = Partial<Omit<Entry, 'id'>>;
+export type EntryPatch = Partial<Omit<Entry, 'id' | 'paidAt'>>;
 
 export const FINANCE_KEY = 'workhub:finance:v1';
 /** Names created on first run. Empty: add people from the “+ Thêm tên” row. */
@@ -59,6 +71,27 @@ function readLegacy(): Omit<FinanceData, 'version'> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Applies a patch and keeps paidAt in step with paid (the server does the same and its time wins on reload):
+ * unpaid -> paid stamps now, paid -> unpaid clears it.
+ */
+export function withPaidAt<E extends Entry>(e: E, patch: EntryPatch): E {
+  const next = { ...e, ...patch };
+  if (patch.paid === true && !e.paid) next.paidAt = new Date().toISOString();
+  else if (patch.paid === false) next.paidAt = null;
+  return next;
+}
+
+/** "2026-11-12T07:05:00Z" -> "12/11/2026 14:05" in the viewer's time zone. */
+export function paidAtLabel(iso: string | null | undefined, withTime = true): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n: number) => String(n).padStart(2, '0');
+  const day = `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
+  return withTime ? `${day} ${p(d.getHours())}:${p(d.getMinutes())}` : day;
 }
 
 /** 90 -> "90.000đ" */
@@ -129,8 +162,8 @@ export function useFinance() {
 
   const reload = useCallback(async () => {
     try {
-      const r = await api<{ people: Person[]; entries: Entry[]; initialized: boolean }>('GET', '/api/finance');
-      setData({ version: 2, people: r.people, entries: r.entries });
+      const r = await api<{ people: Person[]; entries: Entry[]; driveUrl: string | null; initialized: boolean }>('GET', '/api/finance');
+      setData({ version: 2, people: r.people, entries: r.entries, driveUrl: r.driveUrl });
       return r;
     } catch (e) {
       setError(errorMessage(e));
@@ -171,8 +204,8 @@ export function useFinance() {
 
   /** Returns the new person so callers can add entries for them right away (saves stay in order). */
   const addPerson = useCallback(
-    (name: string, email?: string | null): Person => {
-      const p: Person = { id: uid(), name, email: email || null };
+    (name: string, email?: string | null, debt = 0): Person => {
+      const p: Person = { id: uid(), name, email: email || null, debt: debt > 0 ? debt : 0, debtNote: null };
       commit((d) => ({ ...d, people: [...d.people, p] }), () => api('POST', '/api/people', p));
       return p;
     },
@@ -197,6 +230,22 @@ export function useFinance() {
     [commit],
   );
 
+  /** Opening debt (0 clears it, e.g. once it has been paid). */
+  const setPersonDebt = useCallback(
+    (id: string, debt: number, debtNote: string | null) =>
+      commit(
+        (d) => ({ ...d, people: d.people.map((p) => (p.id === id ? { ...p, debt, debtNote: debt > 0 ? debtNote : null } : p)) }),
+        () => api('PATCH', `/api/people/${id}`, { debt, debtNote: debt > 0 ? (debtNote ?? '') : '' }),
+      ),
+    [commit],
+  );
+
+  /** Shared Google Drive link; null removes it. */
+  const setDriveUrl = useCallback(
+    (driveUrl: string | null) => commit((d) => ({ ...d, driveUrl }), () => api('PATCH', '/api/settings', { driveUrl: driveUrl ?? '' })),
+    [commit],
+  );
+
   /** Also deletes that person's entries. */
   const removePerson = useCallback(
     (id: string) =>
@@ -210,7 +259,7 @@ export function useFinance() {
   /** Adds the given entries (e.g. the same content for several people) in one request. */
   const addEntries = useCallback(
     (list: NewEntry[]) => {
-      const created: Entry[] = list.map((e) => ({ ...e, id: uid(), paid: false }));
+      const created: Entry[] = list.map((e) => ({ ...e, id: uid(), paid: false, paidAt: null }));
       commit((d) => ({ ...d, entries: [...d.entries, ...created] }), () => api('POST', '/api/entries', { entries: created }));
     },
     [commit],
@@ -219,7 +268,7 @@ export function useFinance() {
   const updateEntry = useCallback(
     (id: string, patch: EntryPatch) =>
       commit(
-        (d) => ({ ...d, entries: d.entries.map((e) => (e.id === id ? { ...e, ...patch } : e)) }),
+        (d) => ({ ...d, entries: d.entries.map((e) => (e.id === id ? withPaidAt(e, patch) : e)) }),
         () => api('PATCH', `/api/entries/${id}`, patch),
       ),
     [commit],
@@ -240,6 +289,19 @@ export function useFinance() {
     [commit],
   );
 
+  /** Marks many entries paid / unpaid in one request (a whole week, or everything a person owes). */
+  const setEntriesPaid = useCallback(
+    (ids: string[], paid: boolean) => {
+      if (!ids.length) return;
+      const pick = new Set(ids);
+      commit(
+        (d) => ({ ...d, entries: d.entries.map((e) => (pick.has(e.id) ? withPaidAt(e, { paid }) : e)) }),
+        () => api('POST', '/api/entries/paid', { ids, paid }),
+      );
+    },
+    [commit],
+  );
+
   return {
     data,
     error,
@@ -247,11 +309,14 @@ export function useFinance() {
     addPerson,
     renamePerson,
     setPersonEmail,
+    setPersonDebt,
+    setDriveUrl,
     removePerson,
     addEntries,
     updateEntry,
     deleteEntry,
     deleteEntries,
+    setEntriesPaid,
   };
 }
 

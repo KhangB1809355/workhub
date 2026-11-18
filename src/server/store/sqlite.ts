@@ -4,7 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import type { Entry, Person } from '@/lib/finance';
 import type { Goal, Task } from '@/lib/types';
-import { Conflict, type Store } from './types';
+import { Conflict, type PersonPatch, type Store } from './types';
 
 const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'workhub.db');
 
@@ -52,6 +52,9 @@ function open(): Database.Database {
   `);
   migrateExpenses(db);
   addColumn(db, 'people', 'email', 'TEXT');
+  addColumn(db, 'people', 'debt', 'REAL NOT NULL DEFAULT 0');
+  addColumn(db, 'people', 'debt_note', 'TEXT');
+  addColumn(db, 'finance_entries', 'paid_at', 'TEXT');
   return db;
 }
 
@@ -205,28 +208,46 @@ interface EntryRow {
   date: string;
   amount: number;
   paid: number;
+  paid_at: string | null;
 }
 
-const toEntry = (r: EntryRow): Entry => ({ id: r.id, personId: r.person_id, content: r.content, date: r.date, amount: r.amount, paid: !!r.paid });
+const toEntry = (r: EntryRow): Entry => ({
+  id: r.id,
+  personId: r.person_id,
+  content: r.content,
+  date: r.date,
+  amount: r.amount,
+  paid: !!r.paid,
+  paidAt: r.paid ? (r.paid_at ?? null) : null,
+});
+
+const PERSON_COLS = 'id, name, email, debt, debt_note AS debtNote';
 
 function listPeople(): Person[] {
-  return db.prepare('SELECT id, name, email FROM people ORDER BY position, rowid').all() as Person[];
+  return db.prepare(`SELECT ${PERSON_COLS} FROM people ORDER BY position, rowid`).all() as Person[];
 }
 
 function getPerson(id: string): Person | null {
-  return (db.prepare('SELECT id, name, email FROM people WHERE id = ?').get(id) as Person | undefined) ?? null;
+  return (db.prepare(`SELECT ${PERSON_COLS} FROM people WHERE id = ?`).get(id) as Person | undefined) ?? null;
 }
 
 function insertPerson(p: Person) {
   const { n } = db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM people').get() as { n: number };
-  db.prepare('INSERT INTO people (id, name, email, position) VALUES (?, ?, ?, ?)').run(p.id, p.name, p.email ?? null, n);
+  db.prepare('INSERT INTO people (id, name, email, debt, debt_note, position) VALUES (?, ?, ?, ?, ?, ?)').run(p.id, p.name, p.email ?? null, p.debt ?? 0, p.debtNote ?? null, n);
 }
 
-/** Updates name and/or email. */
-function updatePerson(id: string, patch: { name?: string; email?: string | null }): boolean {
+/** Updates any of name, email, opening debt and its note. */
+function updatePerson(id: string, patch: PersonPatch): boolean {
   const cur = getPerson(id);
   if (!cur) return false;
-  db.prepare('UPDATE people SET name = ?, email = ? WHERE id = ?').run(patch.name ?? cur.name, patch.email !== undefined ? patch.email : (cur.email ?? null), id);
+  const pick = <K extends keyof PersonPatch>(k: K, fallback: PersonPatch[K]) => (patch[k] !== undefined ? patch[k] : fallback);
+  db.prepare('UPDATE people SET name = ?, email = ?, debt = ?, debt_note = ? WHERE id = ?').run(
+    pick('name', cur.name),
+    pick('email', cur.email ?? null),
+    pick('debt', cur.debt ?? 0),
+    pick('debtNote', cur.debtNote ?? null),
+    id,
+  );
   return true;
 }
 
@@ -244,18 +265,18 @@ function getEntry(id: string): Entry | null {
   return r ? toEntry(r) : null;
 }
 
-const entryParams = (e: Entry) => ({ id: e.id, person_id: e.personId, content: e.content, date: e.date, amount: e.amount, paid: e.paid ? 1 : 0 });
+const entryParams = (e: Entry) => ({ id: e.id, person_id: e.personId, content: e.content, date: e.date, amount: e.amount, paid: e.paid ? 1 : 0, paid_at: e.paid ? (e.paidAt ?? null) : null });
 
 const insertEntries = db.transaction((entries: Entry[]) => {
   const stmt = db.prepare(
-    'INSERT INTO finance_entries (id, person_id, content, date, amount, paid) VALUES (@id, @person_id, @content, @date, @amount, @paid)',
+    'INSERT INTO finance_entries (id, person_id, content, date, amount, paid, paid_at) VALUES (@id, @person_id, @content, @date, @amount, @paid, @paid_at)',
   );
   for (const e of entries) stmt.run(entryParams(e));
 });
 
 function saveEntry(e: Entry) {
   db.prepare(
-    'UPDATE finance_entries SET person_id = @person_id, content = @content, date = @date, amount = @amount, paid = @paid WHERE id = @id',
+    'UPDATE finance_entries SET person_id = @person_id, content = @content, date = @date, amount = @amount, paid = @paid, paid_at = @paid_at WHERE id = @id',
   ).run(entryParams(e));
 }
 
@@ -267,6 +288,15 @@ const deleteEntries = db.transaction((ids: string[]): number => {
   return n;
 });
 
+const setEntriesPaid = db.transaction((ids: string[], paid: boolean, at: string): number => {
+  const stmt = paid
+    ? db.prepare('UPDATE finance_entries SET paid = 1, paid_at = ? WHERE id = ? AND paid = 0')
+    : db.prepare('UPDATE finance_entries SET paid = 0, paid_at = NULL WHERE id = ? AND paid = 1');
+  let n = 0;
+  for (const id of new Set(ids)) n += (paid ? stmt.run(at, id) : stmt.run(id)).changes;
+  return n;
+});
+
 function deleteEntry(id: string): boolean {
   return db.prepare('DELETE FROM finance_entries WHERE id = ?').run(id).changes > 0;
 }
@@ -275,8 +305,8 @@ function deleteEntry(id: string): boolean {
 const replaceFinance = db.transaction((people: Person[], entries: Entry[]) => {
   db.prepare('DELETE FROM finance_entries').run();
   db.prepare('DELETE FROM people').run();
-  const stmt = db.prepare('INSERT INTO people (id, name, email, position) VALUES (?, ?, ?, ?)');
-  people.forEach((p, i) => stmt.run(p.id, p.name, p.email ?? null, i));
+  const stmt = db.prepare('INSERT INTO people (id, name, email, debt, debt_note, position) VALUES (?, ?, ?, ?, ?, ?)');
+  people.forEach((p, i) => stmt.run(p.id, p.name, p.email ?? null, p.debt ?? 0, p.debtNote ?? null, i));
   insertEntries(entries);
 });
 
@@ -324,6 +354,7 @@ export function createSqliteStore(): Store {
     saveEntry: wrap(saveEntry),
     deleteEntry: wrap(deleteEntry),
     deleteEntries: wrap((ids: string[]) => deleteEntries(ids)),
+    setEntriesPaid: wrap((ids: string[], paid: boolean, at: string) => setEntriesPaid(ids, paid, at)),
     replaceFinance: wrap((people: Person[], entries: Entry[]) => replaceFinance(people, entries)),
   };
 }

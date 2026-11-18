@@ -10,7 +10,7 @@ const REFRESH_MS = 60_000;
 const noop = () => undefined;
 
 /** Read-only page for the share link: shows the finance tab and refreshes every minute while visible. */
-export function ShareView({ token, initial }: { token: string; initial: { people: Person[]; entries: Entry[] } }) {
+export function ShareView({ token, initial }: { token: string; initial: { people: Person[]; entries: Entry[]; driveUrl: string | null } }) {
   const [data, setData] = useState(initial);
   const [today, setToday] = useState('');
   const [toast, setToast] = useState<string | null>(null);
@@ -55,22 +55,25 @@ export function ShareView({ token, initial }: { token: string; initial: { people
 
   // Every action is a no-op: the page cannot change data (and the server would refuse anyway).
   const store: FinanceStore = {
-    data: { version: 2, people: data.people, entries: data.entries },
+    data: { version: 2, people: data.people, entries: data.entries, driveUrl: data.driveUrl },
     error: null,
     clearError: noop,
     addPerson: (name: string) => ({ id: '', name }),
     renamePerson: noop,
     setPersonEmail: noop,
+    setPersonDebt: noop,
+    setDriveUrl: noop,
     removePerson: noop,
     addEntries: noop,
     updateEntry: noop,
     deleteEntry: noop,
     deleteEntries: noop,
+    setEntriesPaid: noop,
   };
 
   return (
     <div className="min-h-screen px-4 pb-10 pt-5 lg:px-7">
-      <main className="mx-auto flex max-w-[1600px] flex-col gap-4">
+      <main className="mx-auto flex max-w-[2200px] flex-col gap-4">
         <FinancePanel store={store} today={today} flash={flash} readOnly />
       </main>
       {toast && (

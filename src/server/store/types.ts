@@ -4,7 +4,7 @@ import type { Goal, Task } from '@/lib/types';
 /** Duplicate id or a reference to something that does not exist (mapped to HTTP 409). */
 export class Conflict extends Error {}
 
-export type PersonPatch = { name?: string; email?: string | null };
+export type PersonPatch = { name?: string; email?: string | null; debt?: number; debtNote?: string | null };
 
 /** Everything the app stores. Implemented by SQLite (local file) and Firestore (Firebase). */
 export interface Store {
@@ -40,5 +40,10 @@ export interface Store {
   saveEntry(e: Entry): Promise<void>;
   deleteEntry(id: string): Promise<boolean>;
   deleteEntries(ids: string[]): Promise<number>;
+  /**
+   * Marks several entries paid (stamping `at` on those not paid yet; already-paid ones keep their time)
+   * or unpaid (clearing paidAt), all-or-nothing. Unknown ids are ignored. Returns how many changed.
+   */
+  setEntriesPaid(ids: string[], paid: boolean, at: string): Promise<number>;
   replaceFinance(people: Person[], entries: Entry[]): Promise<void>;
 }

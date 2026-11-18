@@ -39,11 +39,17 @@ if (has('tasks'))
   );
 if (has('people')) {
   const cols = rows('PRAGMA table_info(people)').map((c) => c.name);
-  rows('SELECT * FROM people ORDER BY position, rowid').forEach((r, i) => put('people', r.id, { name: r.name, email: cols.includes('email') ? (r.email ?? null) : null, position: i }));
+  rows('SELECT * FROM people ORDER BY position, rowid').forEach((r, i) => put('people', r.id, {
+    name: r.name,
+    email: cols.includes('email') ? (r.email ?? null) : null,
+    debt: cols.includes('debt') ? (r.debt ?? 0) : 0,
+    debtNote: cols.includes('debt_note') ? (r.debt_note ?? null) : null,
+    position: i,
+  }));
 }
 if (has('finance_entries'))
   rows('SELECT * FROM finance_entries ORDER BY date, rowid').forEach((r, i) =>
-    put('finance_entries', r.id, { personId: r.person_id, content: r.content, date: r.date, amount: r.amount, paid: !!r.paid, seq: base + i }),
+    put('finance_entries', r.id, { personId: r.person_id, content: r.content, date: r.date, amount: r.amount, paid: !!r.paid, paidAt: r.paid ? (r.paid_at ?? null) : null, seq: base + i }),
   );
 
 if (force) {

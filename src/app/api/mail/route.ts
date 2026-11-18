@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getPerson, listEntries } from '@/server/db';
-import { appBaseUrl, mailConfigured, sendPaymentMail, unpaidWeeks } from '@/server/mail';
+import { getDriveUrl, getPerson, listEntries } from '@/server/db';
+import { amountDue, appBaseUrl, mailConfigured, sendPaymentMail, unpaidWeeks } from '@/server/mail';
 import { handler } from '@/server/route';
 import { getShareToken, rotateShareToken } from '@/server/share';
 import { BadRequest, obj } from '@/server/validate';
@@ -22,7 +22,7 @@ type Result = { personId: string; name: string; status: 'sent' | 'no-email' | 'n
 
 /**
  * Admin only. Body: { personIds: string[] }.
- * Emails each person their unpaid weeks, the read-only share link and the payment QR code.
+ * Emails each person their opening debt and unpaid weeks, the read-only share link, the Google Drive link and the payment QR code.
  * Turns sharing on if it was off (the email needs a working link).
  */
 export async function POST(req: Request) {
@@ -35,7 +35,7 @@ export async function POST(req: Request) {
     const shareCreated = !token;
     if (!token) token = await rotateShareToken();
     const link = `${appBaseUrl(req)}/view/${token}`;
-    const entries = await listEntries();
+    const [entries, driveUrl] = await Promise.all([listEntries(), getDriveUrl()]);
 
     const results: Result[] = [];
     for (const id of ids) {
@@ -46,12 +46,12 @@ export async function POST(req: Request) {
         continue;
       }
       const weeks = unpaidWeeks(p.id, entries);
-      if (!weeks.length) {
+      if (amountDue(p, weeks) <= 0) {
         results.push({ personId: p.id, name: p.name, status: 'nothing-due' });
         continue;
       }
       try {
-        await sendPaymentMail({ ...p, email: p.email }, weeks, link);
+        await sendPaymentMail({ ...p, email: p.email }, weeks, link, { driveUrl });
         results.push({ personId: p.id, name: p.name, status: 'sent' });
       } catch (e) {
         console.error('send mail failed', p.email, e);

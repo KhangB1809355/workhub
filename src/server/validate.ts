@@ -1,5 +1,7 @@
 import 'server-only';
 import type { Entry, Person } from '@/lib/finance';
+import { isDriveUrl } from '@/lib/drive';
+import type { PersonPatch } from './store/types';
 import type { Goal, Priority, Repeat, Status, Subtask, Tag, Task } from '@/lib/types';
 
 /** Thrown for bad request bodies; route handlers turn it into a 400 response. */
@@ -117,19 +119,45 @@ export function email(v: unknown): string | null {
   return s;
 }
 
-export function person(v: unknown): Person {
-  const o = obj(v);
-  return { id: id(o.id), name: text(o.name, 'name', 80), email: email(o.email) };
+/** Opening debt in thousands of VND: 0 (none) up to 1e9. Missing = 0. */
+function debt(v: unknown): number {
+  if (v === undefined || v === null) return 0;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1e9) throw new BadRequest('Số nợ cũ không hợp lệ');
+  return v;
 }
 
-/** Body: any of { name, email } */
-export function personPatch(v: unknown): { name?: string; email?: string | null } {
+/** Optional short note: '' or null clears it. */
+function debtNote(v: unknown): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  return str(v, 'debtNote', 120).trim() || null;
+}
+
+export function person(v: unknown): Person {
   const o = obj(v);
-  const out: { name?: string; email?: string | null } = {};
+  const d = debt(o.debt);
+  return { id: id(o.id), name: text(o.name, 'name', 80), email: email(o.email), debt: d, debtNote: d ? debtNote(o.debtNote) : null };
+}
+
+/** Body: any of { name, email, debt, debtNote } */
+export function personPatch(v: unknown): PersonPatch {
+  const o = obj(v);
+  const out: PersonPatch = {};
   if ('name' in o) out.name = text(o.name, 'name', 80);
   if ('email' in o) out.email = email(o.email);
-  if (!('name' in o) && !('email' in o)) throw new BadRequest('Cần name hoặc email');
+  if ('debt' in o) out.debt = debt(o.debt);
+  if ('debtNote' in o) out.debtNote = debtNote(o.debtNote);
+  if (out.debt === 0) out.debtNote = null;
+  if (!Object.keys(out).length) throw new BadRequest('Cần name, email hoặc debt');
   return out;
+}
+
+/** Shared Google Drive link: '' or null removes it; only https drive.google.com / docs.google.com. */
+export function driveUrl(v: unknown): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  const s = str(v, 'driveUrl', 2000).trim();
+  if (!s) return null;
+  if (!isDriveUrl(s)) throw new BadRequest('Link phải là link Google Drive (https://drive.google.com/… hoặc https://docs.google.com/…)');
+  return s;
 }
 
 function amount(v: unknown): number {
@@ -137,9 +165,10 @@ function amount(v: unknown): number {
   return v;
 }
 
-export function entryPatch(v: unknown): Partial<Omit<Entry, 'id'>> {
+/** Client-editable fields. paidAt is never taken from a patch: the server stamps it when paid changes. */
+export function entryPatch(v: unknown): Partial<Omit<Entry, 'id' | 'paidAt'>> {
   const o = obj(v);
-  const out: Partial<Omit<Entry, 'id'>> = {};
+  const out: Partial<Omit<Entry, 'id' | 'paidAt'>> = {};
   if ('personId' in o) out.personId = id(o.personId, 'personId');
   if ('content' in o) out.content = text(o.content, 'content');
   if ('date' in o) out.date = date(o.date);
@@ -157,7 +186,11 @@ export function entry(v: unknown): Entry {
   for (const k of ['personId', 'content', 'date', 'amount'] as const) {
     if (p[k] === undefined) throw new BadRequest(`Thiếu ${k}`);
   }
-  return { id: id(o.id), paid: false, ...p } as Entry;
+  const e = { id: id(o.id), paid: false, ...p } as Entry;
+  // Imports may carry the original payment time; anything else gets "now" when paid, null when not.
+  const at = typeof o.paidAt === 'string' && o.paidAt.length <= 40 && !Number.isNaN(Date.parse(o.paidAt)) ? new Date(o.paidAt).toISOString() : null;
+  e.paidAt = e.paid ? (at ?? new Date().toISOString()) : null;
+  return e;
 }
 
 /** Body: { entries: Entry[] } */
@@ -173,6 +206,15 @@ export function financeSnapshot(v: unknown): { people: Person[]; entries: Entry[
   const people = arr(o.people, 'people').map(person);
   const known = new Set(people.map((p) => p.id));
   return { people, entries: arr(o.entries, 'entries').map(entry).filter((e) => known.has(e.personId)) };
+}
+
+/** Body: { ids: string[] (1–450), paid: boolean } — 450 keeps it to one atomic Firestore batch. */
+export function paidList(v: unknown): { ids: string[]; paid: boolean } {
+  const o = obj(v);
+  const ids = idList(o);
+  if (ids.length > 450) throw new BadRequest('Tối đa 450 khoản mỗi lần');
+  if (typeof o.paid !== 'boolean') throw new BadRequest('paid phải là true/false');
+  return { ids, paid: o.paid };
 }
 
 /** Body: { ids: string[] } (1–1000 ids) */

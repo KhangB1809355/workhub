@@ -1,5 +1,7 @@
 'use client';
 
+import { debtOf } from '@/lib/finance';
+
 import { useEffect, useState } from 'react';
 import { CARD, FAINT, MUTED } from '@/lib/constants';
 import type { Entry, Person } from '@/lib/finance';
@@ -27,6 +29,8 @@ export function MailControl({ people, entries, status, flash }: { people: Person
 
   const due = new Map<string, number>();
   for (const e of entries) if (!e.paid) due.set(e.personId, (due.get(e.personId) ?? 0) + e.amount);
+  // Opening debt counts too (it is included in the email).
+  for (const p of people) if (debtOf(p)) due.set(p.id, (due.get(p.id) ?? 0) + debtOf(p));
   const owing = people.filter((p) => (due.get(p.id) ?? 0) > 0);
   const recipients = owing.filter((p) => p.email);
   const missing = owing.filter((p) => !p.email);

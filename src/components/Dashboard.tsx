@@ -192,7 +192,7 @@ export default function Dashboard() {
       )}
 
       <div className="min-w-0 flex-1 px-4 pb-12 pt-7 lg:px-7">
-      <main className={`mx-auto flex flex-col ${tab === 'finance' ? 'max-w-[1600px] gap-4' : 'max-w-[1180px] gap-5.5'}`}>
+      <main className={`mx-auto flex flex-col ${tab === 'finance' ? 'max-w-[2200px] gap-4' : 'max-w-[1180px] gap-5.5'}`}>
         {SHOW_WORK && (
         <div role="tablist" aria-label="Chọn mục quản lý" className="flex gap-1 self-start rounded-xl bg-slate-200/70 p-1 dark:bg-[#151B2E]">
           {TABS.map(([t, label]) => (

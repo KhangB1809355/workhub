@@ -38,18 +38,34 @@ const call =
 // ----- short cache for the public share page (saves Firestore reads; cleared on every finance write) -----
 
 const CACHE_MS = 20_000;
-let financeCache: { at: number; data: { people: Person[]; entries: Entry[] } } | null = null;
+type FinanceSnapshot = { people: Person[]; entries: Entry[]; driveUrl: string | null };
+let financeCache: { at: number; data: FinanceSnapshot } | null = null;
 const dropFinanceCache = () => {
   financeCache = null;
 };
 
-/** People + entries for the read-only share page, cached for a few seconds. */
-export async function financeSnapshot(): Promise<{ people: Person[]; entries: Entry[] }> {
+/** People + entries + Drive link for the read-only share page, cached for a few seconds. */
+export async function financeSnapshot(): Promise<FinanceSnapshot> {
   if (financeCache && Date.now() - financeCache.at < CACHE_MS) return financeCache.data;
   const s = await store();
-  const [people, entries] = await Promise.all([s.listPeople(), s.listEntries()]);
-  financeCache = { at: Date.now(), data: { people, entries } };
+  const [people, entries, driveUrl] = await Promise.all([s.listPeople(), s.listEntries(), s.getSetting(DRIVE_KEY)]);
+  financeCache = { at: Date.now(), data: { people, entries, driveUrl: driveUrl || null } };
   return financeCache.data;
+}
+
+const DRIVE_KEY = 'drive_url';
+
+/** Shared Google Drive link shown on the finance tab, the share page and in reminder emails. */
+export async function getDriveUrl(): Promise<string | null> {
+  return (await (await store()).getSetting(DRIVE_KEY)) || null;
+}
+
+/** null removes the link. */
+export async function setDriveUrl(url: string | null): Promise<void> {
+  const s = await store();
+  if (url) await s.setSetting(DRIVE_KEY, url);
+  else await s.deleteSetting(DRIVE_KEY);
+  dropFinanceCache();
 }
 
 // ----- settings -----
@@ -81,4 +97,5 @@ export const insertEntries = call('insertEntries', dropFinanceCache);
 export const saveEntry = call('saveEntry', dropFinanceCache);
 export const deleteEntry = call('deleteEntry', dropFinanceCache);
 export const deleteEntries = call('deleteEntries', dropFinanceCache);
+export const setEntriesPaid = call('setEntriesPaid', dropFinanceCache);
 export const replaceFinance = call('replaceFinance', dropFinanceCache);

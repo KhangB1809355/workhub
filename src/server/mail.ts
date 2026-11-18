@@ -1,7 +1,8 @@
 import 'server-only';
 import path from 'node:path';
 import nodemailer from 'nodemailer';
-import { BANK } from '@/lib/bank';
+import QRCode from 'qrcode';
+import { BANK, transferNote as noteFor, vietQrPayload } from '@/lib/bank';
 import { addDays, ddmm, ddmmyyyy, isoWeek, startOfWeek, weekday } from '@/lib/date';
 import type { Entry, Person } from '@/lib/finance';
 
@@ -62,22 +63,23 @@ export function unpaidWeeks(personId: string, entries: Entry[]): UnpaidWeek[] {
 
 export const MAIL_TITLE = 'Thanh toán chi phí ăn uống';
 
-/** "Phạm Đoàn Khang" -> "Pham Doan Khang" (bank transfer notes should avoid diacritics). */
-const plain = (s: string) =>
-  s
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/đ/g, 'd')
-    .replace(/Đ/g, 'D')
-    .replace(/[^\w .-]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
 /** Suggested transfer note, e.g. "A.Phong TT an uong T45-46". */
 export function transferNote(name: string, weeks: UnpaidWeek[]): string {
-  const nums = [...new Set(weeks.map((w) => isoWeek(w.start)))].sort((a, b) => a - b);
-  const range = nums.length > 1 ? `${nums[0]}-${nums[nums.length - 1]}` : `${nums[0] ?? ''}`;
-  return `${plain(name)} TT an uong T${range}`.trim();
+  return noteFor(name, weeks.map((w) => w.start));
+}
+
+/**
+ * The QR embedded in the email (cid:qr): a VietQR PNG generated here with this person's amount and note,
+ * so it needs no outside service. Falls back to the static QR card if generation fails.
+ */
+async function qrAttachment(total: number, note: string) {
+  try {
+    const content = await QRCode.toBuffer(vietQrPayload(total, note), { type: 'png', width: 480, margin: 2, errorCorrectionLevel: 'M' });
+    return { filename: 'qr-chuyen-khoan.png', content, cid: 'qr', contentType: 'image/png', dynamic: true };
+  } catch (e) {
+    console.warn('QR generation failed, using the static QR', e);
+    return { filename: 'qr-chuyen-khoan.jpg', path: QR_PATH, cid: 'qr', dynamic: false };
+  }
 }
 
 // Palette (inline styles only: email clients ignore <style> blocks unevenly)
@@ -96,9 +98,36 @@ const C = {
 };
 const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
-function render(person: Person, weeks: UnpaidWeek[], link: string) {
-  const total = weeks.reduce((s, w) => s + w.total, 0);
-  const count = weeks.reduce((s, w) => s + w.items.length, 0);
+/** Extra lines for the reminder: the person's opening debt and the shared Google Drive link. */
+export interface MailExtras {
+  driveUrl?: string | null;
+}
+
+const debtAmount = (p: Person) => (p.debt && p.debt > 0 ? p.debt : 0);
+
+/** Opening debt + every unpaid week. */
+export const amountDue = (person: Person, weeks: UnpaidWeek[]) => debtAmount(person) + weeks.reduce((s, w) => s + w.total, 0);
+
+function render(person: Person, weeks: UnpaidWeek[], link: string, qrPrefilled = true, extras: MailExtras = {}) {
+  const debt = debtAmount(person);
+  const total = amountDue(person, weeks);
+  const count = weeks.reduce((s, w) => s + w.items.length, 0) + (debt ? 1 : 0);
+  const driveUrl = extras.driveUrl || null;
+  const countLabel = [`${count} khoản`, weeks.length ? `${weeks.length} tuần` : '', debt ? 'gồm nợ trước đó' : ''].filter(Boolean).join(' · ');
+  const debtBlock = debt
+    ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ${C.line};border-radius:14px;border-collapse:separate;margin:0 0 12px">
+        <tr><td style="padding:12px 16px;background:${C.soft};border-radius:14px">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="font:700 14px/1.3 ${FONT};color:${C.ink}">Nợ trước đó
+              ${person.debtNote ? `<div style="font:400 12px/1.4 ${FONT};color:${C.muted};margin-top:2px">${esc(person.debtNote)}</div>` : ''}
+              ${driveUrl ? `<div style="margin-top:4px"><a href="${esc(driveUrl)}" target="_blank" style="font:600 12px/1.4 ${FONT};color:${C.brand2}">Kiểm tra trên Google Drive →</a></div>` : ''}
+            </td>
+            <td align="right" style="font:800 16px/1.3 ${FONT};color:${C.accent};white-space:nowrap">${money(debt)}</td>
+          </tr></table>
+        </td></tr>
+      </table>`
+    : '';
   const note = transferNote(person.name, weeks);
   const oldest = weeks[weeks.length - 1]?.start;
   const newest = weeks[0]?.start;
@@ -145,7 +174,7 @@ function render(person: Person, weeks: UnpaidWeek[], link: string) {
   const html = `<!doctype html>
 <html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${MAIL_TITLE}</title></head>
 <body style="margin:0;padding:0;background:${C.bg};-webkit-text-size-adjust:100%">
-  <div style="display:none;max-height:0;overflow:hidden;opacity:0">Cần thanh toán ${money(total)} chi phí ăn uống (${weeks.length} tuần). Quét mã QR để chuyển khoản.</div>
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0">Cần thanh toán ${money(total)} chi phí ăn uống (${countLabel}). Quét mã QR để chuyển khoản.</div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg}">
     <tr><td align="center" style="padding:28px 12px">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px">
@@ -165,11 +194,12 @@ function render(person: Person, weeks: UnpaidWeek[], link: string) {
             <tr><td align="center" style="padding:20px 16px">
               <div style="font:600 12px/1 ${FONT};letter-spacing:.08em;text-transform:uppercase;color:${C.muted}">Số tiền cần thanh toán</div>
               <div style="font:800 34px/1.2 ${FONT};color:${C.accent};margin-top:10px">${money(total)}</div>
-              <div style="font:400 13px/1.4 ${FONT};color:${C.muted};margin-top:6px">${count} khoản · ${weeks.length} tuần</div>
+              <div style="font:400 13px/1.4 ${FONT};color:${C.muted};margin-top:6px">${countLabel}</div>
             </td></tr>
           </table>
 
-          <div style="font:700 15px/1.4 ${FONT};color:${C.ink};margin:26px 0 12px">Chi tiết theo tuần</div>
+          <div style="font:700 15px/1.4 ${FONT};color:${C.ink};margin:26px 0 12px">${weeks.length ? 'Chi tiết theo tuần' : 'Chi tiết'}</div>
+          ${debtBlock}
           ${weekBlocks}
 
           <!-- Payment -->
@@ -177,7 +207,9 @@ function render(person: Person, weeks: UnpaidWeek[], link: string) {
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ${C.line};border-radius:16px;border-collapse:separate">
             <tr><td align="center" style="padding:22px 16px 6px">
               <img src="cid:qr" width="200" alt="Mã QR chuyển khoản ${esc(BANK.name)}" style="display:block;width:200px;max-width:100%;height:auto;border-radius:14px;border:0">
-              <div style="font:400 12px/1.4 ${FONT};color:${C.faint};margin-top:10px">Mở app ngân hàng → Quét mã QR</div>
+              <div style="font:400 12px/1.4 ${FONT};color:${C.faint};margin-top:10px">${
+                qrPrefilled ? 'Mở app ngân hàng → Quét mã QR (đã có sẵn số tiền và nội dung)' : 'Mở app ngân hàng → Quét mã QR → nhập số tiền và nội dung bên dưới'
+              }</div>
             </td></tr>
             <tr><td style="padding:8px 20px 16px">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
@@ -213,7 +245,8 @@ function render(person: Person, weeks: UnpaidWeek[], link: string) {
     `${MAIL_TITLE.toUpperCase()}`,
     ``,
     `Chào ${person.name},`,
-    `Số tiền cần thanh toán: ${money(total)} (${count} khoản, ${weeks.length} tuần)${period ? ` · ${period}` : ''}`,
+    `Số tiền cần thanh toán: ${money(total)} (${countLabel})${period ? ` · ${period}` : ''}`,
+    ...(debt ? [``, `Nợ trước đó: ${money(debt)}${person.debtNote ? ` (${oneLine(person.debtNote)})` : ''}`, ...(driveUrl ? [`  Kiểm tra trên Google Drive: ${driveUrl}`] : [])] : []),
     ...weeks.flatMap((w) => [
       ``,
       `Tuần ${isoWeek(w.start)} (${ddmm(w.start)} – ${ddmmyyyy(addDays(w.start, 6))}): ${money(w.total)}`,
@@ -233,16 +266,16 @@ function render(person: Person, weeks: UnpaidWeek[], link: string) {
     `Nếu bạn đã chuyển khoản, vui lòng bỏ qua email này. Cảm ơn bạn!`,
   ].join('\n');
 
-  return { html, text, total };
+  return { html, text, total, note };
 }
 
 /** HTML + text of the reminder, without sending (used for previews). */
-export function renderPaymentMail(person: Person, weeks: UnpaidWeek[], link: string) {
-  return render(person, weeks, link);
+export function renderPaymentMail(person: Person, weeks: UnpaidWeek[], link: string, extras: MailExtras = {}) {
+  return render(person, weeks, link, true, extras);
 }
 
 /** Sends one payment reminder with the share link and the QR code embedded. */
-export async function sendPaymentMail(person: Person & { email: string }, weeks: UnpaidWeek[], link: string) {
+export async function sendPaymentMail(person: Person & { email: string }, weeks: UnpaidWeek[], link: string, extras: MailExtras = {}) {
   const cfg = smtp();
   if (!cfg.configured) throw new Error('Chưa cấu hình SMTP trong .env.local');
   const transport = nodemailer.createTransport({
@@ -251,13 +284,15 @@ export async function sendPaymentMail(person: Person & { email: string }, weeks:
     secure: cfg.secure,
     auth: { user: cfg.user, pass: cfg.pass },
   });
-  const { html, text, total } = render(person, weeks, link);
+  const qr = await qrAttachment(amountDue(person, weeks), transferNote(person.name, weeks));
+  const { dynamic, ...attachment } = qr;
+  const { html, text, total } = render(person, weeks, link, dynamic, extras);
   await transport.sendMail({
     from: cfg.from,
     to: person.email,
     subject: oneLine(`${MAIL_TITLE}: ${person.name} cần thanh toán ${money(total)}`),
     text,
     html,
-    attachments: [{ filename: 'qr-chuyen-khoan.jpg', path: QR_PATH, cid: 'qr' }],
+    attachments: [attachment],
   });
 }

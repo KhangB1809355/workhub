@@ -11,8 +11,8 @@ import { Conflict, type PersonPatch, type Store } from './types';
  *   settings/{key}            { value }
  *   tasks/{id}                Task fields + seq
  *   goals/{id}                { periodKey, title, seq }
- *   people/{id}               { name, email, position }
- *   finance_entries/{id}      { personId, content, date, amount, paid, seq }
+ *   people/{id}               { name, email, debt, debtNote, position }
+ *   finance_entries/{id}      { personId, content, date, amount, paid, paidAt, seq }
  *
  * `seq` keeps insertion order for rows on the same date. Lists are sorted in memory,
  * so no composite indexes have to be created in the Firebase console.
@@ -122,12 +122,22 @@ const entryData = (e: Entry, seq: number): Stored<Entry> => ({
   date: e.date,
   amount: e.amount,
   paid: !!e.paid,
+  paidAt: e.paid ? (e.paidAt ?? null) : null,
   seq,
 });
-const toEntry = (id: string, d: Stored<Entry>): Entry => ({ id, personId: d.personId, content: d.content, date: d.date, amount: d.amount, paid: !!d.paid });
+const toEntry = (id: string, d: Stored<Entry>): Entry => ({
+  id,
+  personId: d.personId,
+  content: d.content,
+  date: d.date,
+  amount: d.amount,
+  paid: !!d.paid,
+  paidAt: d.paid ? (d.paidAt ?? null) : null,
+});
 
-type PersonDoc = { name: string; email: string | null; position: number };
-const toPerson = (id: string, d: PersonDoc): Person => ({ id, name: d.name, email: d.email ?? null });
+type PersonDoc = { name: string; email: string | null; debt?: number; debtNote?: string | null; position: number };
+const toPerson = (id: string, d: PersonDoc): Person => ({ id, name: d.name, email: d.email ?? null, debt: d.debt ?? 0, debtNote: d.debtNote ?? null });
+const personData = (p: Person, position: number): PersonDoc => ({ name: p.name, email: p.email ?? null, debt: p.debt ?? 0, debtNote: p.debtNote ?? null, position });
 
 export function createFirestoreStore(): Store {
   const db = open();
@@ -255,7 +265,7 @@ export function createFirestoreStore(): Store {
     async insertPerson(p) {
       const last = await col.people.orderBy('position', 'desc').limit(1).get();
       const position = last.empty ? 0 : (last.docs[0].data() as PersonDoc).position + 1;
-      await create(col.people.doc(p.id), { name: p.name, email: p.email ?? null, position });
+      await create(col.people.doc(p.id), personData(p, position));
     },
     async updatePerson(id: string, patch: PersonPatch) {
       const ref = col.people.doc(id);
@@ -263,6 +273,8 @@ export function createFirestoreStore(): Store {
       const data: Partial<PersonDoc> = {};
       if (patch.name !== undefined) data.name = patch.name;
       if (patch.email !== undefined) data.email = patch.email;
+      if (patch.debt !== undefined) data.debt = patch.debt;
+      if (patch.debtNote !== undefined) data.debtNote = patch.debtNote;
       if (Object.keys(data).length) await ref.update(data);
       return true;
     },
@@ -321,12 +333,24 @@ export function createFirestoreStore(): Store {
       await inBatches(db, found, (b, s) => b.delete(s.ref));
       return found.length;
     },
+    async setEntriesPaid(ids, paid, at) {
+      const unique = [...new Set(ids)];
+      if (!unique.length) return 0;
+      const snaps = await db.getAll(...unique.map((id) => col.entries.doc(id)));
+      const change = snaps.filter((s) => s.exists && !!(s.data() as Stored<Entry>).paid !== paid);
+      if (!change.length) return 0;
+      // ids are capped at BATCH_LIMIT by the route, so this is a single atomic batch.
+      const batch = db.batch();
+      for (const s of change) batch.update(s.ref, { paid, paidAt: paid ? at : null });
+      await batch.commit();
+      return change.length;
+    },
     async replaceFinance(people, entries) {
       const known = new Set(people.map((p) => p.id));
       if (entries.some((e) => !known.has(e.personId))) throw new Conflict('Người không tồn tại');
       await deleteAll(db, 'finance_entries');
       await deleteAll(db, 'people');
-      await inBatches(db, people.map((p, i) => [p, i] as const), (b, [p, i]) => b.set(col.people.doc(p.id), { name: p.name, email: p.email ?? null, position: i }));
+      await inBatches(db, people.map((p, i) => [p, i] as const), (b, [p, i]) => b.set(col.people.doc(p.id), personData(p, i)));
       const base = nextSeq();
       await inBatches(db, entries.map((e, i) => [e, i] as const), (b, [e, i]) => b.set(col.entries.doc(e.id), entryData(e, base + i)));
     },

@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CARD, FAINT, FIELD, LABEL, MUTED } from '@/lib/constants';
 import { addDays, ddmm, ddmmyyyy, isoWeek, startOfWeek, weekday } from '@/lib/date';
-import { money, totals, type Entry, type FinanceStore, type Person } from '@/lib/finance';
+import { debtOf, money, paidAtLabel, totals, type Entry, type FinanceStore, type Person } from '@/lib/finance';
+import { isDriveUrl } from '@/lib/drive';
 import Image from 'next/image';
 import qrCard from '@/assets/qr_card.jpg';
-import { BANK } from '@/lib/bank';
+import { BANK, transferNote } from '@/lib/bank';
+import { VietQr } from './VietQr';
 import { Icon } from './Icon';
 import { looksLikeEmail, useMailStatus } from '@/lib/mail';
 import { MailControl } from './MailControl';
@@ -50,6 +52,38 @@ function AmountInput({ value, onCommit, label, className }: { value: number; onC
       onBlur={commit}
       onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       className={className}
+    />
+  );
+}
+
+/** Grid input for a person's debt from before (thousands of VND). Empty or 0 clears it; commits on blur / Enter. */
+function DebtInput({ value, onCommit, label }: { value: number; onCommit: (n: number) => void; label: string }) {
+  const shown = value ? String(value).replace('.', ',') : '';
+  const [text, setText] = useState(shown);
+  const [prev, setPrev] = useState(value);
+  if (prev !== value) {
+    setPrev(value);
+    setText(shown);
+  }
+  const commit = () => {
+    const n = text.trim() ? parseK(text) : 0;
+    if (text.trim() && !n) return setText(shown);
+    if (n !== value) onCommit(n);
+    else setText(shown);
+  };
+  return (
+    <input
+      inputMode="decimal"
+      aria-label={label}
+      title="Số tiền nợ trước đó (nghìn đồng). Xóa trống để bỏ."
+      placeholder="+ nợ"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+      className={`h-13 w-full rounded-lg border border-transparent bg-transparent px-2 text-center text-base font-bold tabular-nums outline-none transition placeholder:text-xs placeholder:font-medium placeholder:text-slate-300 hover:border-slate-200 focus:border-indigo-500 focus:bg-white dark:placeholder:text-slate-600 dark:hover:border-[#2A3350] dark:focus:bg-[#0F1527] ${
+        value ? 'bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-300' : ''
+      }`}
     />
   );
 }
@@ -150,7 +184,7 @@ function CellDialog({
                         e.paid ? 'bg-green-600 text-white dark:bg-emerald-500' : 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300'
                       }`}
                     >
-                      {e.paid ? '✓ Đã trả' : 'Chưa trả'}
+                      {e.paid ? `✓ Đã trả${e.paidAt ? ` ${paidAtLabel(e.paidAt, false).slice(0, 5)}` : ''}` : 'Chưa trả'}
                     </span>
                   </>
                 ) : (
@@ -177,13 +211,14 @@ function CellDialog({
                   type="button"
                   onClick={() => store.updateEntry(e.id, { paid: !e.paid })}
                   aria-pressed={e.paid}
+                  title={e.paid && e.paidAt ? `Đã trả lúc ${paidAtLabel(e.paidAt)} · bấm để bỏ` : undefined}
                   className={`h-8 flex-none rounded-lg px-2.5 text-xs font-bold transition ${
                     e.paid
                       ? 'bg-green-600 text-white dark:bg-emerald-500'
                       : 'border border-slate-300 text-slate-600 hover:border-green-600 hover:text-green-700 dark:border-slate-600 dark:text-slate-300'
                   }`}
                 >
-                  {e.paid ? '✓ Đã trả' : 'Chưa trả'}
+                  {e.paid ? `✓ Đã trả${e.paidAt ? ` ${paidAtLabel(e.paidAt, false).slice(0, 5)}` : ''}` : 'Chưa trả'}
                 </button>
                 <button
                   type="button"
@@ -310,6 +345,178 @@ function EmailBox({ person, onEmail }: { person: Person; onEmail: (email: string
   );
 }
 
+/** Opening-debt editor inside the person popup (admin only): amount in thousands + optional note. */
+function DebtBox({ person, onDebt }: { person: Person; onDebt: (debt: number, note: string | null) => void }) {
+  const cur = debtOf(person);
+  const [amount, setAmount] = useState(cur ? String(cur) : '');
+  const [note, setNote] = useState(person.debtNote ?? '');
+  const [prev, setPrev] = useState({ cur, note: person.debtNote ?? '' });
+  if (prev.cur !== cur || prev.note !== (person.debtNote ?? '')) {
+    setPrev({ cur, note: person.debtNote ?? '' });
+    setAmount(cur ? String(cur) : '');
+    setNote(person.debtNote ?? '');
+  }
+  const n = amount.trim() ? parseK(amount) : 0;
+  const changed = n !== cur || (n > 0 && note.trim() !== (person.debtNote ?? ''));
+  const save = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (amount.trim() && !n) return;
+    onDebt(n, note.trim() || null);
+  };
+
+  return (
+    <form onSubmit={save} className="flex flex-none flex-col gap-1.5 border-b border-slate-100 px-5 py-3.5 dark:border-[#232B45]">
+      <label htmlFor={`debt-${person.id}`} className={`flex items-center gap-2 text-xs font-semibold ${MUTED}`}>
+        <Icon name="wallet" className="h-4 w-4" />
+        Nợ trước đó (nghìn đồng)
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <input
+          id={`debt-${person.id}`}
+          inputMode="decimal"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="vd: 150"
+          className={`${FIELD} h-10 w-28 text-right text-[13px] font-bold tabular-nums`}
+        />
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          maxLength={120}
+          placeholder="Ghi chú, vd: nợ tháng 10"
+          aria-label={`Ghi chú nợ cũ của ${person.name}`}
+          className={`${FIELD} h-10 min-w-0 flex-1 text-[13px]`}
+        />
+        <button
+          type="submit"
+          disabled={!changed || (!!amount.trim() && !n)}
+          className="flex h-10 items-center rounded-xl bg-indigo-600 px-3.5 text-xs font-bold text-white transition hover:bg-indigo-700 disabled:opacity-40 dark:bg-indigo-500"
+        >
+          Lưu
+        </button>
+      </div>
+      {!!amount.trim() && !n && <p className="text-xs font-semibold text-red-700 dark:text-red-300">Số tiền không hợp lệ</p>}
+      <p className={`text-[11px] ${FAINT}`}>Được cộng vào “Chưa trả tất cả”, bảng Xếp hạng và email nhắc. Để trống rồi Lưu để xóa.</p>
+    </form>
+  );
+}
+
+/** Link to the shared Google Drive folder; the owner can also set, change or remove it. */
+function DriveLink({ url, onChange, flash }: { url: string | null; onChange?: (url: string | null) => void; flash: (msg: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(url ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setEditing(false);
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [editing]);
+
+  if (!url && !onChange) return null;
+  const open = () => {
+    setValue(url ?? '');
+    setError(null);
+    setEditing(true);
+  };
+  const save = (e: React.FormEvent) => {
+    e.preventDefault();
+    const v = value.trim();
+    if (v && !isDriveUrl(v)) return setError('Hãy dán link Google Drive (https://drive.google.com/… hoặc https://docs.google.com/…)');
+    onChange?.(v || null);
+    setEditing(false);
+    flash(v ? 'Đã lưu link Google Drive' : 'Đã xóa link Google Drive');
+  };
+  const pill = 'flex h-10 items-center gap-2 rounded-xl px-3.5 text-[13px] font-bold transition';
+
+  return (
+    <>
+      {url ? (
+        <span className="flex">
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            title="Kiểm tra số tiền nợ trước đó trên Google Drive"
+            className={`${pill} border border-white/25 text-white hover:bg-white/10 ${onChange ? 'rounded-r-none border-r-0' : ''}`}
+          >
+            <Icon name="folder" className="h-4 w-4" strokeWidth={2.1} />
+            Google Drive
+          </a>
+          {onChange && (
+            <button
+              type="button"
+              onClick={open}
+              aria-label="Sửa link Google Drive"
+              title="Sửa link Google Drive"
+              className="flex h-10 items-center rounded-r-xl border border-white/25 px-2 text-[11px] font-bold text-indigo-200 transition hover:bg-white/10"
+            >
+              Sửa
+            </button>
+          )}
+        </span>
+      ) : (
+        <button type="button" onClick={open} className={`${pill} border border-dashed border-white/35 text-indigo-100 hover:bg-white/10`}>
+          <Icon name="folder" className="h-4 w-4" strokeWidth={2.1} />
+          Thêm link Drive
+        </button>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center text-slate-900 sm:items-center dark:text-slate-100">
+          <button type="button" aria-label="Đóng" onClick={() => setEditing(false)} className="absolute inset-0 cursor-default bg-slate-900/45 dark:bg-black/60" />
+          <form
+            onSubmit={save}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Link Google Drive"
+            className={`${CARD} relative flex w-full max-w-lg flex-col gap-3 rounded-b-none p-5 sm:rounded-b-[18px]`}
+          >
+            <div>
+              <h2 className="text-lg font-extrabold">Link Google Drive</h2>
+              <p className={`text-[13px] ${MUTED}`}>
+                File/thư mục trên Drive ghi số tiền nợ trước đó, để mọi người kiểm tra lại. Hiện trên bảng (cột “Nợ trước đó”), trang chia sẻ và trong email nhắc. Nhớ bật quyền “Bất kỳ ai có đường liên kết” trên Drive.
+              </p>
+            </div>
+            <input
+              autoFocus
+              type="url"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="https://drive.google.com/drive/folders/…"
+              aria-label="Link Google Drive"
+              className={`${FIELD} h-10 text-[13px]`}
+            />
+            {error && <p className="text-xs font-semibold text-red-700 dark:text-red-300">{error}</p>}
+            <div className="flex flex-wrap justify-end gap-2">
+              {url && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange?.(null);
+                    setEditing(false);
+                    flash('Đã xóa link Google Drive');
+                  }}
+                  className="mr-auto flex h-10 items-center rounded-xl px-3.5 text-sm font-bold text-red-700 transition hover:bg-red-50 dark:text-red-300 dark:hover:bg-[#3A1D24]"
+                >
+                  Xóa link
+                </button>
+              )}
+              <button type="button" onClick={() => setEditing(false)} className={`${navBtn} px-4`}>
+                Hủy
+              </button>
+              <button type="submit" className="flex h-10 items-center rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white transition hover:bg-indigo-700 dark:bg-indigo-500">
+                Lưu
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </>
+  );
+}
+
 /** Popup: every week in which one person still has unpaid entries. */
 function UnpaidWeeksDialog({
   person,
@@ -320,9 +527,15 @@ function UnpaidWeeksDialog({
   onGoWeek,
   onClose,
   onEmail,
+  onDebt,
+  driveUrl,
 }: {
+  /** Shared Google Drive link for checking the debt from before. */
+  driveUrl?: string | null;
   /** Admin only: edit the person's email. */
   onEmail?: (email: string | null) => void;
+  /** Admin only: edit / clear the person's opening debt. */
+  onDebt?: (debt: number, note: string | null) => void;
   person: Person;
   entries: Entry[];
   readOnly: boolean;
@@ -346,7 +559,39 @@ function UnpaidWeeksDialog({
   const list = [...weeks.entries()]
     .sort(([a], [b]) => (a < b ? 1 : -1))
     .map(([start, items]) => ({ start, items: items.sort((a, b) => (a.date < b.date ? -1 : 1)), total: totals(items).total }));
-  const grand = totals(unpaid).total;
+  const debt = debtOf(person);
+  const grand = totals(unpaid).total + debt;
+
+  // QR for everything unpaid (opening debt included), or for one week when "QR tuần này" is picked.
+  const [qrWeek, setQrWeek] = useState<string | null>(null);
+  const qrItems = qrWeek ? (list.find((w) => w.start === qrWeek)?.items ?? unpaid) : unpaid;
+  const qrAmount = totals(qrItems).total + (qrWeek ? 0 : debt);
+  const qrNote = transferNote(person.name, qrItems.map((e) => e.date));
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = async (what: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(what);
+      setTimeout(() => setCopied(null), 1600);
+    } catch {
+      /* clipboard blocked: the value is visible anyway */
+    }
+  };
+
+  // Payment history: paid entries grouped by the day they were marked paid, newest first.
+  const history = useMemo(() => {
+    const days = new Map<string, Entry[]>();
+    for (const e of entries) {
+      if (e.personId !== person.id || !e.paid || !e.paidAt) continue;
+      const day = paidAtLabel(e.paidAt, false);
+      days.set(day, [...(days.get(day) ?? []), e]);
+    }
+    return [...days.values()]
+      .map((items) => ({ at: items.reduce((m, e) => (e.paidAt! > m ? e.paidAt! : m), ''), items, total: totals(items).total }))
+      .sort((a, b) => (a.at < b.at ? 1 : -1))
+      .slice(0, 12);
+  }, [entries, person.id]);
+  const paidNoDate = entries.filter((e) => e.personId === person.id && e.paid && !e.paidAt).length;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
@@ -361,9 +606,10 @@ function UnpaidWeeksDialog({
           <div>
             <h2 className="text-lg font-extrabold">{person.name}</h2>
             <p className={`text-[13px] ${MUTED}`}>
-              {list.length ? (
+              {grand > 0 ? (
                 <>
-                  {list.length} tuần chưa trả · tổng <b className="text-orange-700 dark:text-orange-300">{money(grand)}</b>
+                  {[list.length ? `${list.length} tuần chưa trả` : '', debt ? 'nợ trước đó' : ''].filter(Boolean).join(' + ')} · tổng{' '}
+                  <b className="text-orange-700 dark:text-orange-300">{money(grand)}</b>
                 </>
               ) : (
                 'Đã trả đủ tất cả các tuần 🎉'
@@ -376,8 +622,90 @@ function UnpaidWeeksDialog({
         </div>
 
         {onEmail && <EmailBox person={person} onEmail={onEmail} />}
+        {onDebt && <DebtBox person={person} onDebt={onDebt} />}
+
+        {!readOnly && list.length + (debt ? 1 : 0) > 1 && (
+          <div className="flex flex-none items-center justify-between gap-3 border-b border-slate-100 px-5 py-2.5 dark:border-[#232B45]">
+            <span className={`text-[13px] ${MUTED}`}>Đã nhận đủ {money(grand)}?</span>
+            <button
+              type="button"
+              onClick={() => {
+                if (unpaid.length) onPayWeek(unpaid);
+                if (debt) onDebt?.(0, null);
+              }}
+              className="flex h-8 items-center rounded-xl bg-green-600 px-3 text-xs font-bold text-white transition hover:bg-green-700 dark:bg-emerald-500"
+            >
+              ✓ Đã trả hết {unpaid.length ? `${unpaid.length} khoản` : ''}
+              {unpaid.length && debt ? ' + ' : ''}
+              {debt ? 'nợ trước đó' : ''}
+            </button>
+          </div>
+        )}
 
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-5 pt-4">
+          {qrAmount > 0 && (
+            <section aria-label="Chuyển khoản bằng QR" className="flex flex-wrap items-center gap-4 rounded-2xl bg-orange-50 p-3.5 dark:bg-orange-950/30">
+              <div className="mx-auto flex-none overflow-hidden rounded-xl bg-white p-1.5">
+                <VietQr amount={qrAmount} note={qrNote} alt={`QR chuyển ${money(qrAmount)} cho ${BANK.holder}`} />
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col gap-1.5 text-[13px]">
+                <p className={`text-xs ${MUTED}`}>{qrWeek ? `QR tuần ${isoWeek(qrWeek)}` : 'QR toàn bộ khoản chưa trả'} · quét là có sẵn số tiền</p>
+                <p className="text-xl font-extrabold tabular-nums text-orange-700 dark:text-orange-300">{money(qrAmount)}</p>
+                <p className="min-w-0">
+                  <span className={FAINT}>Nội dung: </span>
+                  <b className="break-words">{qrNote}</b>
+                </p>
+                <p className={`text-xs ${FAINT}`}>
+                  {BANK.name} · {BANK.account} · {BANK.holder}
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  <button type="button" onClick={() => copy('amount', String(Math.round(qrAmount * 1000)))} className={`${navBtn} h-8 px-2.5 text-xs`}>
+                    {copied === 'amount' ? '✓ Đã chép' : 'Chép số tiền'}
+                  </button>
+                  <button type="button" onClick={() => copy('note', qrNote)} className={`${navBtn} h-8 px-2.5 text-xs`}>
+                    {copied === 'note' ? '✓ Đã chép' : 'Chép nội dung'}
+                  </button>
+                  {qrWeek && (
+                    <button type="button" onClick={() => setQrWeek(null)} className={`${navBtn} h-8 px-2.5 text-xs`}>
+                      QR tất cả
+                    </button>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {debt > 0 && (
+            <section aria-label="Nợ trước đó" className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 px-3.5 py-2.5 dark:border-[#2A3350]">
+              <div className="min-w-0">
+                <p className="text-sm font-bold">Nợ trước đó</p>
+                <p className={`truncate text-xs ${FAINT}`}>
+                  {person.debtNote || 'Trước khi dùng bảng này'}
+                  {driveUrl && (
+                    <>
+                      {' · '}
+                      <a href={driveUrl} target="_blank" rel="noreferrer" className="font-semibold text-indigo-600 hover:underline dark:text-indigo-300">
+                        Kiểm tra trên Drive
+                      </a>
+                    </>
+                  )}
+                </p>
+              </div>
+              <div className="flex flex-none items-center gap-2">
+                <span className="text-[15px] font-extrabold tabular-nums text-orange-700 dark:text-orange-300">{money(debt)}</span>
+                {!readOnly && onDebt && (
+                  <button
+                    type="button"
+                    onClick={() => onDebt(0, null)}
+                    className="h-7 flex-none rounded-lg border border-slate-300 px-2 text-[11px] font-bold text-slate-600 transition hover:border-green-600 hover:text-green-700 dark:border-slate-600 dark:text-slate-300"
+                  >
+                    Đã trả
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
+
           {list.map((w) => (
             <section key={w.start} className="rounded-2xl border border-slate-200 dark:border-[#2A3350]">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3.5 py-2.5 dark:border-[#232B45]">
@@ -410,6 +738,16 @@ function UnpaidWeeksDialog({
                 ))}
               </ul>
               <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 px-3.5 py-2 dark:border-[#232B45]">
+                {list.length + (debt ? 1 : 0) > 1 && (
+                  <button
+                    type="button"
+                    aria-pressed={qrWeek === w.start}
+                    onClick={() => setQrWeek(qrWeek === w.start ? null : w.start)}
+                    className={`${navBtn} h-8 px-3 text-xs ${qrWeek === w.start ? 'border-orange-400 text-orange-700 dark:text-orange-300' : ''}`}
+                  >
+                    QR tuần này
+                  </button>
+                )}
                 <button type="button" onClick={() => onGoWeek(w.start)} className={`${navBtn} h-8 px-3 text-xs`}>
                   Xem tuần này
                 </button>
@@ -425,6 +763,37 @@ function UnpaidWeeksDialog({
               </div>
             </section>
           ))}
+
+          {(history.length > 0 || paidNoDate > 0) && (
+            <section aria-label="Lịch sử thanh toán" className="flex flex-col gap-1.5">
+              <p className="text-sm font-bold">Lịch sử thanh toán</p>
+              {history.map((h) => (
+                <details key={h.at} className="rounded-xl bg-green-50 px-3 py-2 text-[13px] dark:bg-emerald-950/30">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                    <span>
+                      <b>{paidAtLabel(h.at, false)}</b>
+                      <span className={`ml-2 text-xs ${FAINT}`}>{h.items.length} khoản</span>
+                    </span>
+                    <b className="tabular-nums text-green-700 dark:text-emerald-300">{money(h.total)}</b>
+                  </summary>
+                  <ul className="mt-1.5 flex flex-col gap-0.5">
+                    {h.items
+                      .sort((a, b) => (a.date < b.date ? -1 : 1))
+                      .map((e) => (
+                        <li key={e.id} className="flex items-center gap-2">
+                          <span className={`w-14 flex-none text-xs ${FAINT}`}>
+                            {weekday(e.date)} {ddmm(e.date)}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{e.content}</span>
+                          <span className="tabular-nums">{money(e.amount)}</span>
+                        </li>
+                      ))}
+                  </ul>
+                </details>
+              ))}
+              {paidNoDate > 0 && <p className={`text-xs ${FAINT}`}>{paidNoDate} khoản đã trả trước khi app ghi ngày thanh toán.</p>}
+            </section>
+          )}
         </div>
       </div>
     </div>
@@ -545,37 +914,32 @@ function PaymentQR({ flash }: { flash: (msg: string) => void }) {
   };
 
   return (
-    <section className={`${CARD} flex flex-none flex-col gap-3 p-4`}>
-      <div className="flex items-center gap-2">
-        <Icon name="wallet" className={`h-4.5 w-4.5 ${MUTED}`} />
-        <h2 className="flex-1 text-base font-bold">Chuyển khoản</h2>
-        <MaxButton on={false} onClick={() => setBig(true)} />
-      </div>
-      <div className="flex flex-wrap items-center gap-4">
-        <button type="button" onClick={() => setBig(true)} aria-label="Phóng to mã QR" className="mx-auto flex-none overflow-hidden rounded-2xl transition hover:opacity-90">
-          <Image src={qrCard} alt={`Mã VietQR ${BANK.name} – ${BANK.holder} – ${BANK.account}`} className="h-auto w-28" priority={false} />
-        </button>
-        <div className="flex min-w-0 flex-1 flex-col gap-2 text-[13px]">
-          <div>
-            <p className={`text-xs ${FAINT}`}>Ngân hàng</p>
-            <p className="font-semibold">{BANK.name}</p>
-          </div>
-          <div>
-            <p className={`text-xs ${FAINT}`}>Chủ tài khoản</p>
-            <p className="font-semibold">{BANK.holder}</p>
-          </div>
-          <div>
-            <p className={`text-xs ${FAINT}`}>Số tài khoản</p>
-            <p className="text-base font-extrabold tracking-wide tabular-nums">{BANK.account}</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={copy} className={`${navBtn} h-9 px-3 text-xs`}>
-              Sao chép STK
-            </button>
-            <button type="button" onClick={() => setBig(true)} className={`${navBtn} h-9 px-3 text-xs`}>
-              Phóng to QR
-            </button>
-          </div>
+    <section className={`${CARD} flex flex-none items-center gap-3 p-3`}>
+      <button
+        type="button"
+        onClick={() => setBig(true)}
+        aria-label="Phóng to mã QR"
+        title="Phóng to mã QR"
+        className="flex-none overflow-hidden rounded-xl transition hover:opacity-90"
+      >
+        <Image src={qrCard} alt={`Mã VietQR ${BANK.name} – ${BANK.holder} – ${BANK.account}`} className="h-auto w-18" priority={false} />
+      </button>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-[13px]">
+        <p className={`flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] ${FAINT}`}>
+          <Icon name="wallet" className="h-3.5 w-3.5" /> Chuyển khoản
+        </p>
+        <p className="truncate font-semibold" title={`${BANK.name} · ${BANK.holder}`}>
+          {BANK.name} · {BANK.holder}
+        </p>
+        <div className="flex items-center gap-2">
+          <p className="truncate text-[15px] font-extrabold tracking-wide tabular-nums">{BANK.account}</p>
+          <button
+            type="button"
+            onClick={copy}
+            className="flex-none rounded-md px-1.5 py-0.5 text-[11px] font-bold text-indigo-600 transition hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-[#1B2238]"
+          >
+            Sao chép
+          </button>
         </div>
       </div>
 
@@ -612,6 +976,7 @@ export function FinancePanel({
   const [open, setOpen] = useState<{ personId: string | null; date: string } | null>(null);
   const [newName, setNewName] = useState('');
   const [newEmail, setNewEmail] = useState('');
+  const [newDebt, setNewDebt] = useState('');
   const closeDialog = useCallback(() => setOpen(null), []);
   const [eyeFor, setEyeFor] = useState<string | null>(null);
   const mailStatus = useMailStatus(!readOnly);
@@ -677,10 +1042,15 @@ export function FinancePanel({
   const weekEntries = data.entries.filter((e) => e.date >= weekStart && e.date <= weekEnd);
   const week = totals(weekEntries);
   const all = totals(data.entries);
+  const debtTotal = data.people.reduce((s, p) => s + debtOf(p), 0);
   const stats = [
     { label: `Tổng tuần ${isoWeek(weekStart)}`, value: money(week.total), cls: 'text-white' },
     { label: 'Chưa trả trong tuần', value: money(week.due), cls: 'text-orange-300' },
-    { label: 'Chưa trả tất cả các tuần', value: money(all.due), cls: 'text-orange-200' },
+    {
+      label: debtTotal ? `Chưa trả tất cả (gồm ${money(debtTotal)} nợ trước đó)` : 'Chưa trả tất cả các tuần',
+      value: money(all.due + debtTotal),
+      cls: 'text-orange-200',
+    },
   ];
 
   const addName = (e: React.FormEvent) => {
@@ -690,10 +1060,13 @@ export function FinancePanel({
     if (data.people.some((p) => p.name.toLocaleLowerCase('vi') === n.toLocaleLowerCase('vi'))) return flash(`“${n}” đã có trong bảng`);
     const mail = newEmail.trim();
     if (mail && !looksLikeEmail(mail)) return flash('Email không hợp lệ');
-    store.addPerson(n, mail || null);
+    const debt = newDebt.trim() ? parseK(newDebt) : 0;
+    if (newDebt.trim() && !debt) return flash('Số tiền nợ trước đó không hợp lệ');
+    store.addPerson(n, mail || null, debt);
     setNewName('');
     setNewEmail('');
-    flash(`Đã thêm “${n}” vào bảng${mail ? ` · email ${mail}` : ''}`);
+    setNewDebt('');
+    flash(`Đã thêm “${n}” vào bảng${mail ? ` · email ${mail}` : ''}${debt ? ` · nợ trước đó ${money(debt)}` : ''}`);
   };
   const removePerson = (p: Person) => {
     const count = data.entries.filter((e) => e.personId === p.id).length;
@@ -712,6 +1085,7 @@ export function FinancePanel({
     set.add(startOfWeek(e.date));
     dueWeekSets.set(e.personId, set);
   }
+  for (const p of data.people) if (debtOf(p)) dueAll.set(p.id, (dueAll.get(p.id) ?? 0) + debtOf(p));
   const dueWeeks = new Map([...dueWeekSets].map(([id, set]) => [id, set.size]));
   const eyePerson = eyeFor ? data.people.find((p) => p.id === eyeFor) : undefined;
   const names = new Map(data.people.map((p) => [p.id, p.name]));
@@ -753,7 +1127,10 @@ export function FinancePanel({
   const ranking = data.people
     .map((person) => {
       const list = rankEntries.filter((e) => e.personId === person.id);
-      return { person, ...totals(list), unpaid: list.filter((e) => !e.paid).length };
+      const t = totals(list);
+      // Opening debt only belongs to the "all" scope (it is not tied to a week).
+      const debt = rankScope === 'all' ? debtOf(person) : 0;
+      return { person, total: t.total + debt, paid: t.paid, due: t.due + debt, debt, unpaid: list.filter((e) => !e.paid).length + (debt ? 1 : 0) };
     })
     .filter((r) => r.due > 0)
     .sort((a, b) => b.due - a.due || a.person.name.localeCompare(b.person.name, 'vi'));
@@ -797,9 +1174,13 @@ export function FinancePanel({
           ))}
         </div>
         {readOnly ? (
-          <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-indigo-100">Chỉ xem</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <DriveLink url={data.driveUrl ?? null} flash={flash} />
+            <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-indigo-100">Chỉ xem</span>
+          </div>
         ) : (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <DriveLink url={data.driveUrl ?? null} onChange={store.setDriveUrl} flash={flash} />
             <MailControl people={data.people} entries={data.entries} status={mailStatus} flash={flash} />
             <ShareControl flash={flash} />
           </div>
@@ -808,8 +1189,8 @@ export function FinancePanel({
 
       {max && <button type="button" aria-label="Thu nhỏ" onClick={() => setMax(null)} className="fixed inset-0 z-30 cursor-default bg-slate-900/45 dark:bg-black/60" />}
 
-      <div className="grid gap-4 xl:h-[calc(100vh-13.5rem)] xl:min-h-[620px] xl:grid-cols-12 xl:grid-rows-[minmax(0,1.5fr)_minmax(0,1fr)]">
-      <section ref={gridRef} className={panel('grid', `scroll-mt-4 xl:col-span-8 ${SHOW_WEEK_STATS ? '' : 'xl:row-span-2'}`)}>
+      <div className="grid gap-4 xl:h-[calc(100vh-11rem)] xl:min-h-[680px] xl:grid-cols-12 xl:grid-rows-[minmax(0,1.5fr)_minmax(0,1fr)]">
+      <section ref={gridRef} className={panel('grid', `scroll-mt-4 xl:col-span-9 ${SHOW_WEEK_STATS ? '' : 'xl:row-span-2'}`)}>
         <div className="flex flex-none flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 pb-2.5 pt-3">
           <div className="min-w-0">
             <h2 className="text-base font-bold">Bảng thu chi tuần {isoWeek(weekStart)}</h2>
@@ -830,12 +1211,12 @@ export function FinancePanel({
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto border-t border-slate-100 dark:border-[#232B45]">
-          <table className="w-full border-collapse text-sm">
+          <table className="w-full border-collapse text-[15px]">
             <thead className="sticky top-0 z-20 bg-white dark:bg-[#151B2E]">
               <tr className="border-b border-slate-200 dark:border-[#2A3350]">
-                <th className={`${th} ${sticky} min-w-36 pl-4 text-left`}>Tên</th>
+                <th className={`${th} ${sticky} min-w-44 pl-4 text-left`}>Tên</th>
                 {days.map((d) => (
-                  <th key={d} className={`${th} min-w-20 p-1 ${d === today ? 'text-indigo-700 dark:text-indigo-300' : ''}`}>
+                  <th key={d} className={`${th} min-w-24 p-1 ${d === today ? 'text-indigo-700 dark:text-indigo-300' : ''}`}>
                     <button
                       type="button"
                       onClick={() => setOpen({ personId: null, date: d })}
@@ -847,8 +1228,25 @@ export function FinancePanel({
                     </button>
                   </th>
                 ))}
-                <th className={`${th} min-w-24 bg-slate-50 dark:bg-[#1B2238]`}>Tổng tuần</th>
-                <th className={`${th} min-w-24 bg-slate-50 dark:bg-[#1B2238]`}>Chưa trả</th>
+                <th className={`${th} min-w-28 bg-slate-50 dark:bg-[#1B2238]`}>Tổng tuần</th>
+                <th className={`${th} min-w-28 bg-slate-50 dark:bg-[#1B2238]`}>Chưa trả</th>
+                <th className={`${th} min-w-28 border-l border-slate-200 bg-amber-50/60 dark:border-[#2A3350] dark:bg-amber-950/20`}>
+                  <span className="flex items-center justify-center gap-1">
+                    Nợ trước đó
+                    {data.driveUrl && (
+                      <a
+                        href={data.driveUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label="Kiểm tra số tiền nợ trước đó trên Google Drive"
+                        title="Kiểm tra số tiền nợ trước đó trên Google Drive"
+                        className="flex h-6 w-6 items-center justify-center rounded-md text-indigo-600 transition hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-[#1B2238]"
+                      >
+                        <Icon name="folder" className="h-3.5 w-3.5" strokeWidth={2.2} />
+                      </a>
+                    )}
+                  </span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -931,7 +1329,7 @@ export function FinancePanel({
                             onClick={() => setOpen({ personId: p.id, date: d })}
                             title={list.map((e) => `${e.content}: ${money(e.amount)}${e.paid ? ' (đã trả)' : ''}`).join('\n') || (readOnly ? '' : 'Thêm khoản')}
                             aria-label={`${p.name}, ${weekday(d)} ${ddmm(d)}: ${list.length ? money(t.total) : 'trống'}`}
-                            className={`flex h-11 w-full flex-col items-center justify-center rounded-lg text-sm tabular-nums transition ${
+                            className={`flex h-13 w-full flex-col items-center justify-center rounded-lg text-base tabular-nums transition ${
                               state === 'empty'
                                 ? `${FAINT} hover:bg-slate-100 dark:hover:bg-[#1B2238]`
                                 : state === 'paid'
@@ -953,13 +1351,34 @@ export function FinancePanel({
                     >
                       {rowTotals.due ? k(rowTotals.due) : rowTotals.total ? '✓' : '–'}
                     </td>
+                    <td className="border-l border-slate-200 p-1 dark:border-[#2A3350]">
+                      {readOnly ? (
+                        <span
+                          title={p.debtNote ?? undefined}
+                          className={`flex h-13 items-center justify-center rounded-lg text-base font-bold tabular-nums ${
+                            debtOf(p) ? 'bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-300' : FAINT
+                          }`}
+                        >
+                          {debtOf(p) ? k(debtOf(p)) : '–'}
+                        </span>
+                      ) : (
+                        <DebtInput
+                          value={debtOf(p)}
+                          label={`Nợ trước đó của ${p.name} (nghìn đồng)`}
+                          onCommit={(n) => {
+                            store.setPersonDebt(p.id, n, n ? (p.debtNote ?? null) : null);
+                            flash(n ? `Đã ghi nợ trước đó ${money(n)} cho ${p.name}` : `Đã xóa nợ trước đó của ${p.name}`);
+                          }}
+                        />
+                      )}
+                    </td>
                   </tr>
                 );
               })}
 
               {!readOnly && (
               <tr className="border-b border-slate-200 dark:border-[#2A3350]">
-                <td colSpan={10} className="py-2 pl-2 pr-1">
+                <td colSpan={11} className="py-2 pl-2 pr-1">
                   <form onSubmit={addName} className="sticky left-2 flex w-max max-w-[calc(100vw-4rem)] flex-wrap items-center gap-1.5">
                     <input
                       value={newName}
@@ -975,6 +1394,14 @@ export function FinancePanel({
                       placeholder="Email (không bắt buộc)"
                       aria-label="Email của người mới"
                       className="w-56 rounded-lg border border-dashed border-slate-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-600"
+                    />
+                    <input
+                      inputMode="decimal"
+                      value={newDebt}
+                      onChange={(e) => setNewDebt(e.target.value)}
+                      placeholder="Nợ trước đó (nghìn đ)"
+                      aria-label="Nợ trước đó của người mới (nghìn đồng)"
+                      className="w-44 rounded-lg border border-dashed border-slate-300 bg-transparent px-2 py-1.5 text-sm tabular-nums outline-none focus:border-indigo-500 dark:border-slate-600"
                     />
                     {newName.trim() && (
                       <button type="submit" className="flex h-8 flex-none items-center gap-1 rounded-lg bg-indigo-600 px-2.5 text-xs font-bold text-white dark:bg-indigo-500">
@@ -1000,6 +1427,9 @@ export function FinancePanel({
                 })}
                 <td className="px-2 text-center font-extrabold tabular-nums">{k(week.total)}</td>
                 <td className={`px-2 text-center text-[19px] font-extrabold tabular-nums ${week.due ? 'text-orange-700 dark:text-orange-300' : FAINT}`}>{week.due ? k(week.due) : '–'}</td>
+                <td className={`border-l border-slate-200 px-2 text-center font-extrabold tabular-nums dark:border-[#2A3350] ${debtTotal ? 'text-amber-800 dark:text-amber-300' : FAINT}`}>
+                  {debtTotal ? k(debtTotal) : '–'}
+                </td>
               </tr>
             </tfoot>
           </table>
@@ -1095,7 +1525,7 @@ export function FinancePanel({
       </section>
 
       {SHOW_WEEK_STATS && (
-        <section className={panel('stats', 'xl:col-span-8 xl:row-start-2')}>
+        <section className={panel('stats', 'xl:col-span-9 xl:row-start-2')}>
           <div className="flex flex-none flex-col gap-2.5 px-4 pb-3 pt-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-base font-bold">
@@ -1235,11 +1665,11 @@ export function FinancePanel({
         </section>
       )}
 
-      <div className="flex min-h-0 flex-col gap-4 xl:col-span-4 xl:col-start-9 xl:row-span-2 xl:row-start-1">
+      <div className="flex min-h-0 flex-col gap-3 xl:col-span-3 xl:col-start-10 xl:row-span-2 xl:row-start-1">
       <PaymentQR flash={flash} />
       <section className={panel('rank', 'flex-1')}>
-        <div className="flex flex-none flex-wrap items-center justify-between gap-2 px-4 pb-3 pt-3">
-          <h2 className="flex-1 text-base font-bold">Xếp hạng</h2>
+        <div className="flex flex-none flex-wrap items-center justify-between gap-1.5 px-3 pb-2 pt-2.5">
+          <h2 className="flex-1 text-[15px] font-bold">Xếp hạng</h2>
           <div role="group" aria-label="Phạm vi xếp hạng" className="flex gap-1 rounded-xl bg-slate-100 p-1 dark:bg-[#1B2238]">
             {(
               [
@@ -1253,7 +1683,7 @@ export function FinancePanel({
                 type="button"
                 aria-pressed={rankScope === v}
                 onClick={() => setRankScope(v)}
-                className={`min-h-8 rounded-[9px] px-3 text-xs transition ${
+                className={`min-h-7 rounded-[9px] px-2.5 text-xs transition ${
                   rankScope === v ? 'bg-white font-bold text-[#1E1B4B] shadow-sm dark:bg-indigo-500 dark:text-white' : `font-medium ${MUTED}`
                 }`}
               >
@@ -1264,9 +1694,9 @@ export function FinancePanel({
           <MaxButton on={max === 'rank'} onClick={() => toggleMax('rank')} />
         </div>
         {ranking.length === 0 ? (
-          <p className={`px-4 py-6 text-center text-[13px] ${MUTED}`}>Mọi người đã trả đủ {rankScope === 'week' ? `trong tuần ${isoWeek(weekStart)}` : rankScope === 'filtered' ? 'trong các tuần đang lọc' : ''} 🎉</p>
+          <p className={`px-3 py-4 text-center text-[13px] ${MUTED}`}>Mọi người đã trả đủ {rankScope === 'week' ? `trong tuần ${isoWeek(weekStart)}` : rankScope === 'filtered' ? 'trong các tuần đang lọc' : ''} 🎉</p>
         ) : (
-          <ol className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-auto px-3 pb-3">
+          <ol className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto px-2 pb-2">
             {ranking.map((r, i) => {
               const rank = ranks[i];
               const medal =
@@ -1281,22 +1711,23 @@ export function FinancePanel({
               return (
                 <li
                   key={r.person.id}
-                  className={`flex items-center gap-3 rounded-xl px-2.5 py-2 transition ${
+                  className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition ${
                     rank === 1 ? 'bg-amber-50/70 dark:bg-amber-950/20' : 'hover:bg-slate-50 dark:hover:bg-[#1B2238]'
                   }`}
                 >
-                  <span className={`flex h-8 w-8 flex-none items-center justify-center rounded-full text-[13px] font-extrabold ${medal}`}>{rank}</span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-bold">{r.person.name}</p>
-                        <p className={`text-[11px] ${FAINT}`}>
-                          {r.unpaid} khoản chưa trả{r.total !== r.due && ` · tổng ${money(r.total)}`}
-                        </p>
-                      </div>
-                      <span className="whitespace-nowrap text-[15px] font-extrabold tabular-nums text-orange-700 dark:text-orange-300">{money(r.due)}</span>
+                  <span className={`flex h-6 w-6 flex-none items-center justify-center rounded-full text-[11px] font-extrabold ${medal}`}>{rank}</span>
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <div
+                      className="flex items-baseline justify-between gap-2"
+                      title={`${r.unpaid} khoản chưa trả${r.total !== r.due ? ` · tổng ${money(r.total)}` : ''}`}
+                    >
+                      <p className="min-w-0 truncate text-[13px] font-bold">
+                        {r.person.name}
+                        <span className={`ml-1.5 text-[11px] font-medium ${FAINT}`}>{r.unpaid} khoản</span>
+                      </p>
+                      <span className="whitespace-nowrap text-sm font-extrabold tabular-nums text-orange-700 dark:text-orange-300">{money(r.due)}</span>
                     </div>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-[#232B44]">
+                    <div className="h-1 overflow-hidden rounded-full bg-slate-100 dark:bg-[#232B44]">
                       <div
                         className="h-full rounded-full bg-linear-to-r from-orange-300 to-orange-500 transition-[width] duration-500 dark:from-orange-500/70 dark:to-orange-400"
                         style={{ width: `${pct}%` }}
@@ -1339,7 +1770,10 @@ export function FinancePanel({
           readOnly={readOnly}
           onToggle={(e) => store.updateEntry(e.id, { paid: true })}
           onPayWeek={(list) => {
-            list.forEach((e) => store.updateEntry(e.id, { paid: true }));
+            store.setEntriesPaid(
+              list.map((e) => e.id),
+              true,
+            );
             flash(`Đã đánh dấu ${list.length} khoản của ${eyePerson.name} là đã trả`);
           }}
           onGoWeek={(start) => {
@@ -1348,6 +1782,15 @@ export function FinancePanel({
           }}
           onClose={closeEye}
           onEmail={readOnly ? undefined : (email) => store.setPersonEmail(eyePerson.id, email)}
+          driveUrl={data.driveUrl}
+          onDebt={
+            readOnly
+              ? undefined
+              : (debt, note) => {
+                  store.setPersonDebt(eyePerson.id, debt, note);
+                  flash(debt ? `Đã lưu nợ trước đó ${money(debt)} cho ${eyePerson.name}` : `Đã xóa nợ trước đó của ${eyePerson.name}`);
+                }
+          }
         />
       )}
 
